@@ -4,7 +4,8 @@ import type { Session } from '@supabase/supabase-js';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 
 type Profile = { id: string; employee_code: string; full_name: string; department: string | null; designation: string | null; biomax_user_id: string | null; employment_status: string };
-type DayRow = { id: string; employee_id: string; attendance_date: string; first_in_at: string | null; last_out_at: string | null; status: string; working_minutes: number | null; late_minutes: number | null; issue_codes: string[] | null };
+type DayRow = { id: string; employee_id: string; attendance_date: string; first_in_at: string | null; last_out_at: string | null; status: string; working_minutes: number | null; late_minutes: number | null; early_leave_minutes: number | null; manual_break_minutes: number | null; manual_break_recorded_at: string | null; manual_break_note: string | null; issue_codes: string[] | null };
+type ShiftRow = { id: string; shift_code: string; shift_name: string; start_time: string; end_time: string; grace_minutes: number; scheduled_break_minutes: number; break_deduction_mode: string; working_days: number[]; weekly_off_days: number[]; effective_from?: string };
 type RequestRow = { id: string; employee_id: string; attendance_date: string; target_punch: string; original_time: string | null; requested_time: string; reason: string; status: string; submitted_at: string; admin_note: string | null };
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const showTime = (v: string | null) => v ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }).format(new Date(v)) : '—';
@@ -24,6 +25,7 @@ export default function App() {
   const [employees, setEmployees] = useState<Profile[]>([]);
   const [rows, setRows] = useState<DayRow[]>([]);
   const [requests, setRequests] = useState<RequestRow[]>([]);
+  const [generalShift, setGeneralShift] = useState<ShiftRow | null>(null);
   const [targetPunch, setTargetPunch] = useState('IN');
   const [requestedTime, setRequestedTime] = useState('');
   const [reason, setReason] = useState('');
@@ -43,13 +45,14 @@ export default function App() {
     if (pError) throw pError;
     setProfile(p as Profile | null);
     if (role === 'admin') {
-      const [emp, att, req] = await Promise.all([
+      const [emp, att, req, shift] = await Promise.all([
         supabase.from('employees').select('id, employee_code, full_name, department, designation, biomax_user_id, employment_status').order('full_name'),
         supabase.from('attendance_daily_summaries').select('*').eq('attendance_date', date).order('first_in_at'),
-        supabase.from('attendance_correction_requests').select('*').order('submitted_at', { ascending: false }).limit(100)
+        supabase.from('attendance_correction_requests').select('*').order('submitted_at', { ascending: false }).limit(100),
+        supabase.from('shifts').select('id, shift_code, shift_name, start_time, end_time, grace_minutes, scheduled_break_minutes, break_deduction_mode, working_days, weekly_off_days').eq('shift_code', 'GS-01').maybeSingle()
       ]);
-      if (emp.error) throw emp.error; if (att.error) throw att.error; if (req.error) throw req.error;
-      setEmployees((emp.data ?? []) as Profile[]); setRows((att.data ?? []) as DayRow[]); setRequests((req.data ?? []) as RequestRow[]);
+      if (emp.error) throw emp.error; if (att.error) throw att.error; if (req.error) throw req.error; if (shift.error) throw shift.error;
+      setEmployees((emp.data ?? []) as Profile[]); setRows((att.data ?? []) as DayRow[]); setRequests((req.data ?? []) as RequestRow[]); setGeneralShift(shift.data as ShiftRow | null);
     } else if (p) {
       const [att, req] = await Promise.all([
         supabase.from('attendance_daily_summaries').select('*').eq('employee_id', p.id).order('attendance_date', { ascending: false }).limit(90),
@@ -88,6 +91,34 @@ export default function App() {
     setNotice(`Request ${decision}. Adjustment and audit entry recorded.`); await loadData();
   }
 
+  async function recordManualBreak(row: DayRow) {
+    if (!supabase) return;
+    if (!row.first_in_at || !row.last_out_at) {
+      setError('A valid first IN and last OUT are required before recording a break.');
+      return;
+    }
+    const entered = window.prompt(
+      'Enter actual break duration in minutes for ' + showDate(row.attendance_date) + '.\nThe scheduled 60 minutes is a reference only; it will not be deducted automatically.',
+      row.manual_break_minutes == null ? '60' : String(row.manual_break_minutes)
+    );
+    if (entered == null) return;
+    const minutes = Number(entered.trim());
+    if (!Number.isInteger(minutes) || minutes < 0 || minutes > 720) {
+      setError('Enter a whole number of break minutes between 0 and 720.');
+      return;
+    }
+    const note = window.prompt('Optional HR note for this break entry (leave blank when not needed):', row.manual_break_note ?? '') ?? '';
+    if (!window.confirm('Save ' + minutes + ' manual break minutes for ' + showDate(row.attendance_date) + '? Net working time will be recalculated.')) return;
+    setBusy(true); setError('');
+    const { error: saveError } = await supabase.functions.invoke('attendance-manual-break', {
+      body: { employee_id: row.employee_id, attendance_date: row.attendance_date, manual_break_minutes: minutes, note: note.trim() || null }
+    });
+    setBusy(false);
+    if (saveError) { setError(saveError.message); return; }
+    setNotice('Manual break saved. Net working minutes and the HR audit entry were updated.');
+    await loadData();
+  }
+
   if (!isSupabaseConfigured) return <div className="setup"><b>G</b><h1>Connect GSONS Attendance</h1><p>Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in the deployment environment.</p></div>;
   if (authLoading) return <div className="splash"><b>G</b><p>Connecting to GSONS Attendance…</p></div>;
   if (!session) return <div className="login"><section className="brand-panel"><b className="brand-mark">G</b><p>GSONS INDUSTRIES PRIVATE LIMITED</p><h1>Attendance, made clear.</h1><p>Biometric attendance, employee requests and administrator approvals in one place.</p></section><form className="login-card" onSubmit={signIn}><small>WELCOME BACK</small><h2>Sign in to your account</h2>{error && <p className="error">{error}</p>}<label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required /></label><label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required /></label><button disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button><p className="muted">Need access? Contact Admin / HR to provision your account.</p></form></div>;
@@ -105,17 +136,18 @@ export default function App() {
     </aside>
     <main><header><div><small>{role === 'admin' ? 'WORKSPACE' : 'SELF SERVICE'} /</small><strong>{tab.charAt(0).toUpperCase() + tab.slice(1)}</strong></div><div className="user"><span>{session.user.email}</span><button onClick={signOut}>Sign out</button></div></header>
       <section className="content">{error && <div className="error">{error}<button onClick={() => setError('')}>×</button></div>}{notice && <div className="notice">{notice}<button onClick={() => setNotice('')}>×</button></div>}
-      {tab === 'overview' && <><h1>{role === 'admin' ? 'Attendance overview' : `Welcome, ${profile?.full_name ?? 'Employee'}`}</h1><p className="muted">Company attendance summary · Asia/Kolkata</p><div className="stats"><article><small>{role === 'admin' ? 'Active employees' : 'Your records'}</small><strong>{role === 'admin' ? employees.length : rows.length}</strong></article><article><small>Present {role === 'admin' ? 'today' : 'in loaded records'}</small><strong>{present}</strong></article><article><small>Pending corrections</small><strong>{pending}</strong></article><article><small>Attendance date</small><strong>{showDate(date)}</strong></article></div><h2>{role === 'admin' ? 'Today’s attendance' : 'Recent attendance'}</h2>{role === 'admin' && <label className="date-select">Date <input type="date" value={date} onChange={e => setDate(e.target.value)} /></label>}<AttendanceTable rows={rows.slice(0, 12)} people={employeeById} showEmployee={role === 'admin'} /></>}
-      {tab === 'attendance' && <><h1>Attendance records</h1>{role === 'admin' && <label className="date-select">Date <input type="date" value={date} onChange={e => setDate(e.target.value)} /></label>}<AttendanceTable rows={rows} people={employeeById} showEmployee={role === 'admin'} /></>}
+      {tab === 'overview' && <><h1>{role === 'admin' ? 'Attendance overview' : `Welcome, ${profile?.full_name ?? 'Employee'}`}</h1><p className="muted">Company attendance summary · Asia/Kolkata</p><div className="stats"><article><small>{role === 'admin' ? 'Active employees' : 'Your records'}</small><strong>{role === 'admin' ? employees.length : rows.length}</strong></article><article><small>Present {role === 'admin' ? 'today' : 'in loaded records'}</small><strong>{present}</strong></article><article><small>Pending corrections</small><strong>{pending}</strong></article><article><small>Attendance date</small><strong>{showDate(date)}</strong></article></div><h2>{role === 'admin' ? 'Today’s attendance' : 'Recent attendance'}</h2>{role === 'admin' && <label className="date-select">Date <input type="date" value={date} onChange={e => setDate(e.target.value)} /></label>}<AttendanceTable rows={rows.slice(0, 12)} people={employeeById} showEmployee={role === 'admin'} onRecordManualBreak={role === 'admin' ? recordManualBreak : undefined} /></>}
+      {tab === 'attendance' && <><h1>Attendance records</h1>{role === 'admin' && <label className="date-select">Date <input type="date" value={date} onChange={e => setDate(e.target.value)} /></label>}<AttendanceTable rows={rows} people={employeeById} showEmployee={role === 'admin'} onRecordManualBreak={role === 'admin' ? recordManualBreak : undefined} /></>}
       {tab === 'employees' && role === 'admin' && <><h1>Employees</h1><p className="muted">Employee profiles and BioMax user-ID mapping.</p><div className="table-wrap"><table><thead><tr><th>Name</th><th>Employee code</th><th>BioMax ID</th><th>Department</th><th>Status</th></tr></thead><tbody>{employees.map(e => <tr key={e.id}><td>{e.full_name}</td><td>{e.employee_code}</td><td>{e.biomax_user_id ?? 'Not linked'}</td><td>{e.department ?? '—'}</td><td>{e.employment_status}</td></tr>)}</tbody></table></div></>}
       {tab === 'correction' && role === 'employee' && <><h1>Request attendance correction</h1><p className="muted">Your request goes to Admin / HR for review. Original biometric events remain unchanged.</p><form className="panel form" onSubmit={submitCorrection}><label>Attendance date<input type="date" value={date} onChange={e => setDate(e.target.value)} required /></label><label>Punch to correct<select value={targetPunch} onChange={e => setTargetPunch(e.target.value)}><option value="IN">IN punch</option><option value="OUT">OUT punch</option></select></label><label>Requested date and time<input type="datetime-local" value={requestedTime} onChange={e => setRequestedTime(e.target.value)} required /></label><label>Reason<textarea rows={4} maxLength={500} value={reason} onChange={e => setReason(e.target.value)} required /></label><button disabled={busy}>{busy ? 'Submitting…' : 'Submit request'}</button></form></>}
       {tab === 'requests' && <><h1>{role === 'admin' ? 'Correction requests' : 'My correction requests'}</h1><div className="table-wrap"><table><thead><tr><th>Date</th><th>Punch</th><th>Original</th><th>Requested</th><th>Reason</th><th>Status</th>{role === 'admin' && <th>Action</th>}</tr></thead><tbody>{requests.map(r => <tr key={r.id}><td>{showDate(r.attendance_date)}</td><td>{r.target_punch}</td><td>{showTime(r.original_time)}</td><td>{showTime(r.requested_time)}</td><td>{r.reason}</td><td><span className={'pill ' + r.status}>{r.status}</span>{r.admin_note && <small>{r.admin_note}</small>}</td>{role === 'admin' && <td>{r.status === 'pending' ? <div className="actions"><button onClick={() => reviewRequest(r.id,'approved')}>Approve</button><button className="reject" onClick={() => reviewRequest(r.id,'rejected')}>Reject</button></div> : 'Reviewed'}</td>}</tr>)}</tbody></table>{!requests.length && <p className="empty">No correction requests found.</p>}</div></>}
-      {['devices','shifts','reports','profile'].includes(tab) && <div className="panel"><h2>{tab.charAt(0).toUpperCase() + tab.slice(1)} setup is next</h2><p>This section will be activated after device collection, shift policy configuration and employee onboarding are completed.</p></div>}
+      {tab === 'shifts' && role === 'admin' && <><h1>Shift & attendance policy</h1><p className="muted">Active company shift and break recording rules.</p>{generalShift ? <div className="panel shift-policy"><div className="policy-heading"><div><small>ACTIVE SHIFT</small><h2>{generalShift.shift_name}</h2><strong>{generalShift.shift_code}</strong></div><span className="pill approved">Active</span></div><div className="policy-grid"><div><small>Shift timing</small><strong>{generalShift.start_time.slice(0,5)} – {generalShift.end_time.slice(0,5)}</strong></div><div><small>Late grace</small><strong>{generalShift.grace_minutes} minutes</strong></div><div><small>Scheduled break reference</small><strong>{generalShift.scheduled_break_minutes} minutes</strong></div><div><small>Break deduction</small><strong>{generalShift.break_deduction_mode === 'manual' ? 'Manual HR entry' : 'Automatic'}</strong></div><div><small>Working days</small><strong>Monday – Saturday</strong></div><div><small>Weekly off</small><strong>Sunday</strong></div><div><small>Effective from</small><strong>23 Dec 2025</strong></div><div><small>Net working time</small><strong>Only after break entry</strong></div></div><p className="muted policy-note">No 60-minute break is deducted by default. HR records the actual break duration on each completed attendance day. Employee joining dates remain blank and no absence is created before a verified joining date.</p></div> : <div className="panel"><p>GS-01 shift is not available.</p></div>}<div className="panel"><h2>Manual break procedure</h2><p>Open Attendance, select a date, and use Record break for an employee with both IN and OUT punches. Saving a break updates net working minutes and writes an audit entry showing the HR user, time, and note. Raw BioMax punches are never changed.</p></div></>}
+      {['devices','reports','profile'].includes(tab) && <div className="panel"><h2>{tab.charAt(0).toUpperCase() + tab.slice(1)} setup is next</h2><p>This section will be activated after device collection and remaining employee onboarding tasks are completed.</p></div>}
       </section>
     </main>
   </div>;
 }
 
-function AttendanceTable({ rows, people, showEmployee }: { rows: DayRow[]; people: Map<string, Profile>; showEmployee: boolean }) {
-  return <div className="table-wrap"><table><thead><tr>{showEmployee && <th>Employee</th>}<th>Date</th><th>First IN</th><th>Last OUT</th><th>Working time</th><th>Late</th><th>Status</th></tr></thead><tbody>{rows.map(r => <tr key={r.id}>{showEmployee && <td>{people.get(r.employee_id)?.full_name ?? r.employee_id.slice(0,8)}</td>}<td>{showDate(r.attendance_date)}</td><td>{showTime(r.first_in_at)}</td><td>{showTime(r.last_out_at)}</td><td>{r.working_minutes == null ? '—' : `${Math.floor(r.working_minutes/60)}h ${r.working_minutes%60}m`}</td><td>{r.late_minutes == null ? '—' : `${r.late_minutes} min`}</td><td><span className={'pill ' + r.status}>{r.status}</span>{r.issue_codes?.length ? <small>{r.issue_codes.join(', ')}</small> : null}</td></tr>)}</tbody></table>{!rows.length && <p className="empty">No attendance records have been loaded for this date.</p>}</div>;
+function AttendanceTable({ rows, people, showEmployee, onRecordManualBreak }: { rows: DayRow[]; people: Map<string, Profile>; showEmployee: boolean; onRecordManualBreak?: (row: DayRow) => void }) {
+  return <div className="table-wrap"><table><thead><tr>{showEmployee && <th>Employee</th>}<th>Date</th><th>First IN</th><th>Last OUT</th><th>Manual break</th><th>Net working time</th><th>Late</th><th>Early out</th><th>Status</th>{showEmployee && <th>HR action</th>}</tr></thead><tbody>{rows.map(r => <tr key={r.id}>{showEmployee && <td>{people.get(r.employee_id)?.full_name ?? r.employee_id.slice(0,8)}</td>}<td>{showDate(r.attendance_date)}</td><td>{showTime(r.first_in_at)}</td><td>{showTime(r.last_out_at)}</td><td>{r.manual_break_minutes == null ? 'Not recorded' : `${r.manual_break_minutes} min`}{r.manual_break_recorded_at && <small>Saved {showTime(r.manual_break_recorded_at)}</small>}</td><td>{r.working_minutes == null ? '—' : `${Math.floor(r.working_minutes/60)}h ${r.working_minutes%60}m`}</td><td>{r.late_minutes == null ? '—' : `${r.late_minutes} min`}</td><td>{r.early_leave_minutes == null ? '—' : `${r.early_leave_minutes} min`}</td><td><span className={'pill ' + r.status}>{r.status}</span>{r.issue_codes?.length ? <small>{r.issue_codes.join(', ')}</small> : null}</td>{showEmployee && <td>{onRecordManualBreak && r.first_in_at && r.last_out_at ? <button className="break-action" onClick={() => onRecordManualBreak(r)}>{r.manual_break_minutes == null ? 'Record break' : 'Edit break'}</button> : <span className="muted">IN + OUT required</span>}</td>}</tr>)}</tbody></table>{!rows.length && <p className="empty">No attendance records have been loaded for this date.</p>}</div>;
 }
