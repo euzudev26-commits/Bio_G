@@ -1,0 +1,19 @@
+{
+  "device": {
+    "name": "HO_GSONS",
+    "serial_number": "AMDB25093800050",
+    "model": "N-MULTIBIO900 / Multibio 900",
+    "ip": "192.168.1.241",
+    "port": 5005,
+    "protocol_device_id": "0x18181818"
+  },
+  "supabase": {
+    "ingest_url": "https://qwjxoncytsiioexwllky.supabase.co/functions/v1/biomax-ingest"
+  },
+  "collector": {
+    "page_size": 30,
+    "upload_batch_size": 100,
+    "socket_timeout_seconds": 20,
+    "http_timeout_seconds": 45
+  }
+}

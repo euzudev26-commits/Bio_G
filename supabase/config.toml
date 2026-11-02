@@ -2,3 +2,7 @@ project_id = "qwjxoncytsiioexwllky"
 
 [functions.attendance-actions]
 verify_jwt = true
+
+# Authenticates with x-gsons-collector-token; token hash is device scoped.
+[functions.biomax-ingest]
+verify_jwt = false

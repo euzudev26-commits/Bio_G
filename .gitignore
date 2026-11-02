@@ -4,3 +4,10 @@ dist/
 .env.local
 .env.*.local
 .DS_Store
+# BioMax collector secrets and local spool/logs
+collector.private.json
+**/collector.private.json
+state/
+logs/
+__pycache__/
+*.pyc
