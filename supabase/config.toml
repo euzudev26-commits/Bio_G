@@ -1,0 +1,4 @@
+project_id = "qwjxoncytsiioexwllky"
+
+[functions.attendance-actions]
+verify_jwt = true
