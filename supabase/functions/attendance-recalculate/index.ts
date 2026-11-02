@@ -61,6 +61,54 @@ async function fetchAllPages<T>(makeQuery: () => any): Promise<T[]> {
   return rows;
 }
 
+function shiftTimestamp(date: string, time: string, crossesMidnight = false): number {
+  const clock = String(time).slice(0, 8);
+  const effectiveDate = crossesMidnight ? nextCalendarDate(date) : date;
+  return new Date(`${effectiveDate}T${clock}+05:30`).getTime();
+}
+
+function positiveWholeMinutes(later: string | number, earlier: number): number {
+  const laterMs = typeof later === "number" ? later : Date.parse(later);
+  return Math.max(0, Math.floor((laterMs - earlier) / 60000));
+}
+
+function policyFields(row: Record<string, any>, assignments: Record<string, any>[], shiftsById: Map<string, Record<string, any>>, existing: Record<string, any> | undefined) {
+  const assignment = assignments.find((item) =>
+    item.employee_id === row.employee_id
+    && item.effective_from <= row.attendance_date
+    && (!item.effective_to || item.effective_to >= row.attendance_date)
+  );
+  const shift = assignment ? shiftsById.get(assignment.shift_id) : undefined;
+  let lateMinutes: number | null = null;
+  let earlyLeaveMinutes: number | null = null;
+
+  if (shift && row.first_in_at) {
+    const start = shiftTimestamp(row.attendance_date, shift.start_time, false);
+    lateMinutes = positiveWholeMinutes(row.first_in_at, start + Number(shift.grace_minutes ?? 0) * 60000);
+  }
+  if (shift && row.last_out_at) {
+    const end = shiftTimestamp(row.attendance_date, shift.end_time, Boolean(shift.crosses_midnight));
+    earlyLeaveMinutes = positiveWholeMinutes(end, Date.parse(row.last_out_at));
+  }
+
+  const manualBreak = existing?.manual_break_minutes ?? null;
+  let workingMinutes: number | null = null;
+  if (manualBreak != null && row.first_in_at && row.last_out_at) {
+    const gross = positiveWholeMinutes(row.last_out_at, Date.parse(row.first_in_at));
+    workingMinutes = Math.max(0, gross - Number(manualBreak));
+  }
+
+  return {
+    ...row,
+    late_minutes: lateMinutes,
+    early_leave_minutes: earlyLeaveMinutes,
+    manual_break_minutes: manualBreak,
+    working_minutes: workingMinutes,
+    shift_code: shift?.shift_code ?? null,
+    break_deduction_mode: shift?.break_deduction_mode ?? null,
+  };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return response({ error: "Method not allowed" }, 405);
@@ -130,6 +178,29 @@ Deno.serve(async (req: Request) => {
     const todayLocalDate = localDateOf(new Date(), "Asia/Kolkata");
     const result = deriveDailySummaries(events, employees ?? [], { todayLocalDate });
 
+    const [assignmentRows, shiftRows, adjustmentRows, existingRows] = await Promise.all([
+      fetchAllPages<Record<string, any>>(() => adminClient.from("employee_shift_assignments")
+        .select("employee_id, shift_id, effective_from, effective_to")
+        .lte("effective_from", endDate)
+        .or(`effective_to.is.null,effective_to.gte.${startDate}`)),
+      fetchAllPages<Record<string, any>>(() => adminClient.from("shifts")
+        .select("id, shift_code, start_time, end_time, crosses_midnight, grace_minutes, scheduled_break_minutes, break_deduction_mode, working_days, weekly_off_days")),
+      fetchAllPages<Record<string, any>>(() => adminClient.from("attendance_adjustments")
+        .select("employee_id, attendance_date, target_punch")
+        .gte("attendance_date", startDate)
+        .lte("attendance_date", endDate)),
+      fetchAllPages<Record<string, any>>(() => adminClient.from("attendance_daily_summaries")
+        .select("employee_id, attendance_date, status, working_minutes, late_minutes, early_leave_minutes, manual_break_minutes")
+        .gte("attendance_date", startDate)
+        .lte("attendance_date", endDate)),
+    ]);
+
+    const shiftsById = new Map((shiftRows ?? []).map((shift) => [String(shift.id), shift]));
+    const existingByDay = new Map((existingRows ?? []).map((row) => [row.employee_id + "|" + row.attendance_date, row]));
+    const policySummaries = result.summaries.map((row: Record<string, any>) =>
+      policyFields(row, assignmentRows ?? [], shiftsById, existingByDay.get(row.employee_id + "|" + row.attendance_date))
+    );
+
     if (action === "preview") {
       return response({
         ok: true,
@@ -141,15 +212,24 @@ Deno.serve(async (req: Request) => {
         grouping: result.grouping,
         calculation_version: result.calculation_version,
         totals: result.totals,
-        preview_rows: result.summaries.slice(0, 100),
+        shift_policy: {
+          shift_code: "GS-01",
+          start_time: "09:30",
+          end_time: "18:30",
+          grace_minutes: 10,
+          scheduled_break_minutes: 60,
+          break_deduction_mode: "manual",
+          working_days: "Monday-Saturday",
+          weekly_off: "Sunday",
+        },
+        preview_rows: policySummaries.slice(0, 100),
         preview_rows_limit: 100,
         unassigned_event_samples: result.unassigned_events.slice(0, 25),
         invalid_event_samples: result.invalid_events.slice(0, 10),
-        note: "Preview only. Raw events were not changed and daily summaries were not written.",
+        note: "Preview only. Raw events were not changed and daily summaries were not written. Net working minutes remain NULL until Admin / HR records an actual manual break.",
       });
     }
 
-    // Never overwrite an explicit leave/weekly-off/holiday or an approved correction.
     if (result.invalid_events.length > 0) {
       return response({
         error: "Apply stopped because one or more raw events have invalid timestamps or missing identifiers. Review the preview before applying.",
@@ -157,40 +237,28 @@ Deno.serve(async (req: Request) => {
       }, 409);
     }
 
-    const [adjustmentRows, existingRows] = await Promise.all([
-      fetchAllPages<Record<string, any>>(() => adminClient.from("attendance_adjustments")
-        .select("employee_id, attendance_date, target_punch")
-        .gte("attendance_date", startDate)
-        .lte("attendance_date", endDate)),
-      fetchAllPages<Record<string, any>>(() => adminClient.from("attendance_daily_summaries")
-        .select("employee_id, attendance_date, status, working_minutes, late_minutes, early_leave_minutes")
-        .gte("attendance_date", startDate)
-        .lte("attendance_date", endDate)),
-    ]);
-
     const protectedDays = new Set<string>();
-    for (const row of adjustmentRows) {
+    for (const row of adjustmentRows ?? []) {
       protectedDays.add(row.employee_id + "|" + row.attendance_date);
     }
-    for (const row of existingRows) {
+    for (const row of existingRows ?? []) {
       if (["leave", "weekly_off", "holiday"].includes(row.status)
-        || row.working_minutes != null
-        || row.late_minutes != null
-        || row.early_leave_minutes != null) {
+        || row.manual_break_minutes != null
+        || row.working_minutes != null) {
         protectedDays.add(row.employee_id + "|" + row.attendance_date);
       }
     }
 
-    const rowsToWrite = result.summaries
+    const rowsToWrite = policySummaries
       .filter((row: Record<string, any>) => row.employee_id && !protectedDays.has(row.employee_id + "|" + row.attendance_date))
       .map((row: Record<string, any>) => ({
         employee_id: row.employee_id,
         attendance_date: row.attendance_date,
         first_in_at: row.first_in_at,
         last_out_at: row.last_out_at,
-        working_minutes: null,
-        late_minutes: null,
-        early_leave_minutes: null,
+        working_minutes: row.working_minutes,
+        late_minutes: row.late_minutes,
+        early_leave_minutes: row.early_leave_minutes,
         status: row.status,
         issue_codes: row.issue_codes,
         calculation_version: row.calculation_version,
