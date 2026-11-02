@@ -35,11 +35,14 @@ Security verification completed: Supabase security advisor returned no findings.
 ### Not yet complete
 
 - No employee or admin users have been provisioned in Supabase Auth. The known BioMax HO_GSONS device has been registered in the device table.
-- No employee master data or attendance rows have been loaded; the tables currently have zero rows.
+- 32 provisional employee profiles have been created from BioMax user IDs and device names, using generated `BM-` employee codes. Department and designation remain blank.
+- No historical raw punch rows or daily attendance summaries have been imported yet.
 - The initial admin account must be set up before the login can be used.
 - Employee creation/invitation UI is not yet connected.
 - The Windows BioMax collector is not yet built or installed.
-- Historical `GetLogDataPage` import and reconciliation are not yet running.
+- The full BioMax historical export was read locally: 8,396 events across 280 pages. The offline first/last-punch preview maps 8,380 events to 32 employees; 16 `0000` ADMIN events remain unassigned. The preview produces 4,490 employee-days and is not imported.
+- The `attendance-recalculate` Edge Function is deployed with JWT verification and Admin-only access. Default action is preview; apply requires explicit confirmation. It writes derived daily summaries only and never mutates raw events.
+- Calculation v1 derives earliest punch as IN and latest distinct punch as OUT for each Asia/Kolkata calendar date. Single-punch dates have no OUT. Working minutes, late/early status, absences and overnight shifts are not calculated until shift/break policies are agreed.
 - Attendance rules (shift times, weekly off, grace, break and overtime) are not yet configured.
 - The app has not been deployed to Vercel or another web host.
 
@@ -116,7 +119,8 @@ The collector must preserve the original raw payload fields and timestamp, remov
 
 - `src/` — React application, Supabase client and styles.
 - `supabase/migrations/` — database migrations.
-- `supabase/functions/attendance-actions/` — deployed Edge Function source.
+- `supabase/functions/attendance-actions/` — deployed correction workflow Edge Function source.
+- `supabase/functions/attendance-recalculate/` — deployed first/last-punch derived-summary processor.
 - `database/schema.sql` — consolidated schema reference.
 - `docs/` — onboarding and integration notes.
 - `design-prototype.html` — original clickable design prototype.
