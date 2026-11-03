@@ -4,55 +4,68 @@ A responsive React + TypeScript web application for GSONS Industries Private Lim
 
 ## Current implementation status
 
-### Connected to Supabase
+### Live application and Supabase
 
-Project: `qwjxoncytsiioexwllky`  
-URL: `https://qwjxoncytsiioexwllky.supabase.co`  
-Region: `eu-west-1`
+- Production application: https://gsons-attendance-management.vercel.app
+- Supabase project: `qwjxoncytsiioexwllky`
+- Supabase URL: `https://qwjxoncytsiioexwllky.supabase.co`
+- Supabase region: `eu-west-1`
 
-The following database tables have been created and verified with Row Level Security enabled:
+The connected database contains employee master data, registered BioMax device information, original punch events, derived daily summaries, correction requests, approved attendance adjustments, collector sync history and an audit log. Row Level Security is enabled on the exposed application tables.
 
-- `employees`
-- `attendance_devices`
-- `shifts`
-- `employee_shift_assignments`
-- `raw_punch_events`
-- `attendance_daily_summaries`
-- `attendance_correction_requests`
-- `attendance_adjustments`
-- `collector_sync_runs`
-- `attendance_audit_log`
+Latest verified project data during development:
+- 32 employee profiles.
+- 8,436 original raw BioMax punch events.
+- 4,511 derived daily attendance summaries.
+- One registered active BioMax device: HO_GSONS.
 
-The `attendance-actions` Edge Function is deployed with JWT verification enabled. It supports:
+The `attendance-actions` Edge Function is deployed with JWT verification enabled. It supports employee correction submission, Admin/HR approval/rejection, server-side atomic workflows and audit entries. Approved adjustments update derived attendance summaries; they do not mutate original BioMax raw punch events.
 
-- Employee correction submission (employee profile is resolved from the authenticated user; clients cannot choose another employee).
-- Admin-only correction approval/rejection.
-- Server-side atomic database workflows and audit entries.
-- Approved adjustments update the derived daily summary, not the original BioMax raw event.
+The `attendance-recalculate` Edge Function is deployed with Admin-only access. It supports a preview followed by explicit apply confirmation and rebuilds derived summaries only.
 
-Security verification completed: Supabase security advisor returned no findings. The performance advisor's remaining messages are unused-index informational notices because the new tables currently contain no production rows.
+### BioMax collector status
 
-### Not yet complete
+The Windows `GSONS-BioMax-Collector V1.1.2` is present on the office PC and has verified read-only access to the registered terminal:
+- Device: N-MULTIBIO900 / Multibio 900
+- Serial: `AMDB25093800050`
+- Firmware: `K8D_3Y3Kbio030_3.2`
+- Local address: `192.168.1.241:5005`
+- Historical command verified: `GetLogDataPage`
+- Real-time event observed: `POST /AIData.aspx` with `request_code: realtime_glog` and `trans_id: RTLogSend`
 
-- No employee or admin users have been provisioned in Supabase Auth. The known BioMax HO_GSONS device has been registered in the device table.
-- 32 provisional employee profiles have been created from BioMax user IDs and device names, using generated `BM-` employee codes. Department and designation remain blank.
-- No historical raw punch rows or daily attendance summaries have been imported yet.
-- The initial admin account must be set up before the login can be used.
-- Employee creation/invitation UI is not yet connected.
-- The Windows BioMax collector is not yet built or installed.
-- The full BioMax historical export was read locally: 8,396 events across 280 pages. The offline first/last-punch preview maps 8,380 events to 32 employees; 16 `0000` ADMIN events remain unassigned. The preview produces 4,490 employee-days and is not imported.
-- The `attendance-recalculate` Edge Function is deployed with JWT verification and Admin-only access. Default action is preview; apply requires explicit confirmation. It writes derived daily summaries only and never mutates raw events.
-- Calculation v1 derives earliest punch as IN and latest distinct punch as OUT for each Asia/Kolkata calendar date. Single-punch dates have no OUT. Working minutes, late/early status, absences and overnight shifts are not calculated until shift/break policies are agreed.
-- Attendance rules (shift times, weekly off, grace, break and overtime) are not yet configured.
-- The app has not been deployed to Vercel or another web host.
+The installed collector currently downloads historical/rolling punch records and sends them to the existing `biomax-ingest` Edge Function. It is not yet the outbound employee-command worker and does not yet claim or execute the new `device_sync_jobs` queue.
 
-Do not treat the current UI as a production-ready attendance system until onboarding, collector integration, shift policies and end-to-end testing are completed.
+### Two-way synchronization foundation
+
+The Supabase migration `biomax_two_way_sync_foundation` and the follow-up `refine_biomax_employee_sync_field_handling` are applied.
+
+- `device_sync_jobs` stores queued, processing, completed, failed and blocked sync work.
+- Changes to employee fields create audited outbound jobs. A stable BioMax PIN and display-name updates are the currently supported USERINFO field scope.
+- Changes to application-only fields (employee code, department, designation, email, phone, joining date) are explicitly shown as GSONS-only rather than reported as terminal updates.
+- BioMax PIN changes and employment-status changes are blocked for manual review so the system does not delete or recreate users and risk biometric templates.
+- A protected server-side import function updates basic employee identity from BioMax and suppresses echo jobs.
+- The collector-facing `biomax-device-sync` Edge Function source is in the current feature branch; it must be deployed and connected to a new collector release before outbound jobs can execute on the terminal.
+
+**Important device limitation:** The verified PUSH SDK describes USERINFO update commands, but the attendance-log commands found for this protocol include query and whole-log clear, not individual ATTLOG modification. Approved attendance corrections therefore remain in the GSONS adjustment/audit ledger and are explicitly marked blocked for device write. Never use whole-log clear to simulate a single punch correction.
+
+**Transport safety:** The existing TCP JSON interface on port 5005 has only been verified for read commands such as `GetDeviceInfo` and `GetLogDataPage`. The PUSH command channel is a separate HTTP polling/command-response transport. The current Indigo real-time destination at `192.168.20.252:8092` has not been changed.
+
+### Still required for full two-way device operation
+
+- Deploy the new `biomax-device-sync` Edge Function.
+- Update the Windows collector to poll the secure sync API, claim jobs, issue supported USERINFO commands over the correct PUSH transport, and acknowledge jobs only after a successful device response.
+- Safely test the PUSH channel on this exact model/firmware while preserving the existing Indigo event route and a rollback plan.
+- Add a verified BioMax user-list read/import cycle so additions or name changes made on the terminal are reflected in GSONS.
+- Confirm by a controlled test that a GSONS employee-name change appears on the BioMax terminal.
+- Provision employee Auth accounts separately; employee master records do not automatically create login accounts.
+
+Until the collector worker and controlled hardware test are complete, the current work is the synchronization foundation—not end-to-end two-way device synchronization.
 
 ## Local setup
 
 Requirements: Node.js 22.12+ (or current supported LTS), npm 10+, and an internet connection for the first dependency install.
 
-1. Extract this ZIP.
+1. Extract the repository.
 2. Open a terminal in the project folder.
 3. Copy `.env.example` to `.env.local`.
 4. Install dependencies:
@@ -79,48 +92,25 @@ The publishable key in `.env.example` is browser-safe. Never put a Supabase secr
 
 ## Supabase migrations
 
-The SQL source is under `supabase/migrations/`. It records the schema and follow-up hardening migrations that are already applied to the connected project. `database/schema.sql` is a consolidated schema reference. Do not re-run the migrations against the already-configured project unless you intentionally reset a separate development database.
+The SQL source is under `supabase/migrations/`. Applied migrations for the connected project are recorded in Supabase. Do not re-run applied migrations against production; use a separate development project for experiments.
 
-The migration sequence is:
-
-1. `gsons_attendance_initial_schema`
-2. `gsons_attendance_policy_index_hardening`
-3. `gsons_attendance_rls_policy_tuning`
-4. `gsons_attendance_correction_workflows`
-5. `gsons_attendance_apply_approved_adjustment`
-6. `gsons_attendance_seed_hogsons_device`
-7. `gsons_attendance_lockdown_browser_writes`
+The current sequence includes the initial schema, RLS tuning, correction workflows, collector authentication, shift/manual-break policy, reconciliation source-channel allowance, employee write grants, BioMax two-way sync foundation, and the follow-up employee-sync field handling.
 
 ## Authentication and roles
 
 Authorization uses Supabase Auth `app_metadata.role` only. Supported values are `admin` and `employee`. Do not put role claims in user-editable `user_metadata`.
 
-Before first login:
-
-1. Create the initial administrator user from Supabase Dashboard → Authentication → Users.
-2. In the SQL Editor, assign that Auth user's trusted `app_metadata.role` to `admin` using the email address you created (see `docs/first-admin-setup.md`).
-3. Sign in to the app using that administrator account.
-
-Employee accounts must also have `app_metadata.role = 'employee'` and an `employees` row whose `auth_user_id` points to that Auth user. The employee onboarding UI/API is a follow-up build item; do not create a user-facing role editor.
-
-## BioMax facts captured during discovery
-
-- Device name: `HO_GSONS`
-- Serial/Cloud ID: `AMDB25093800050`
-- Model: `N-MULTIBIO900` / Multibio 900
-- Firmware: `K8D_3Y3Kbio030_3.2`
-- Local IP observed: `192.168.1.241`
-- Historical records: device command `GetLogDataPage`
-- Real-time push observed: `POST /AIData.aspx`, `request_code: realtime_glog`, `trans_id: RTLogSend`
-
-The collector must preserve the original raw payload fields and timestamp, remove inline Base64 photo data before JSON storage, optionally upload photo bytes to a private Storage bucket, deduplicate by `event_fingerprint`, and avoid changing device records. The captured device token is intentionally not included in this source package.
+Employee accounts must have `app_metadata.role = 'employee'` and an `employees` row whose `auth_user_id` points to that Auth user. Employee master creation does not create or grant a login account. Do not create a user-facing role editor.
 
 ## Project structure
 
 - `src/` — React application, Supabase client and styles.
 - `supabase/migrations/` — database migrations.
-- `supabase/functions/attendance-actions/` — deployed correction workflow Edge Function source.
-- `supabase/functions/attendance-recalculate/` — deployed first/last-punch derived-summary processor.
+- `supabase/functions/attendance-actions/` — correction submission/review workflow.
+- `supabase/functions/attendance-recalculate/` — derived attendance summary processor.
+- `supabase/functions/biomax-ingest/` — device-scoped punch ingestion endpoint.
+- `supabase/functions/biomax-device-sync/` — token-authenticated employee-sync queue/import API foundation.
 - `database/schema.sql` — consolidated schema reference.
 - `docs/` — onboarding and integration notes.
+- `docs/biomax-two-way-sync.md` — synchronization design and verified device limits.
 - `design-prototype.html` — original clickable design prototype.

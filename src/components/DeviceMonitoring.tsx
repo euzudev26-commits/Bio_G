@@ -8,6 +8,12 @@ export type DeviceRecord = {
   ip_address: string | null;
 };
 
+export type DeviceSyncJobRecord = {
+  id: string; device_id: string | null; direction: string; entity_type: string; entity_id: string | null;
+  operation: string; status: string; payload: Record<string, unknown> | null; attempt_count: number;
+  last_error: string | null; created_at: string; updated_at: string; completed_at: string | null;
+};
+
 export type SyncRunRecord = {
   id: string;
   run_type: string;
@@ -24,6 +30,7 @@ export type SyncRunRecord = {
 type Props = {
   devices: DeviceRecord[];
   syncRuns: SyncRunRecord[];
+  jobs: DeviceSyncJobRecord[];
   refreshing: boolean;
   onRefresh: () => void;
 };
@@ -43,13 +50,16 @@ const age = (value: string | null) => {
 
 const label = (value: string) => value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 
-export default function DeviceMonitoring({ devices, syncRuns, refreshing, onRefresh }: Props) {
+export default function DeviceMonitoring({ devices, syncRuns, jobs, refreshing, onRefresh }: Props) {
   const now = Date.now();
   const active = devices.filter((device) => device.is_active).length;
   const recentlySeen = devices.filter((device) =>
     device.is_active && device.last_seen_at && now - new Date(device.last_seen_at).getTime() <= 30 * 60 * 1000,
   ).length;
   const failures = syncRuns.filter((run) => run.status === 'failed' || run.records_failed > 0).length;
+  const waitingJobs = jobs.filter((job) => job.direction === 'to_device' && (job.status === 'pending' || job.status === 'failed')).length;
+  const blockedJobs = jobs.filter((job) => job.status === 'blocked').length;
+  const completedJobs = jobs.filter((job) => job.status === 'completed').length;
 
   return (
     <div className="device-monitoring">
@@ -67,6 +77,43 @@ export default function DeviceMonitoring({ devices, syncRuns, refreshing, onRefr
         <div><span>Active devices</span><strong>{active}</strong></div>
         <div><span>Seen in last 30 minutes</span><strong>{recentlySeen}</strong></div>
         <div><span>Recent runs needing review</span><strong>{failures}</strong></div>
+      </section>
+
+      <section className="panel device-sync-queue">
+        <div className="module-subheading">
+          <div><span className="module-kicker">TWO-WAY SYNC CONTROL</span><h2>BioMax synchronization queue</h2><p>Audited employee updates and attendance adjustments destined for device-side handling.</p></div>
+        </div>
+        <div className="device-sync-explainer">
+          <strong>Outbound command worker not yet installed</strong>
+          <p>The existing Windows collector V1.1.2 imports punches using the BioMax TCP 5005 interface. It does not yet claim or execute outbound USERINFO jobs. Pending jobs are safely queued in Supabase; none are marked synchronized until the device acknowledges a supported command.</p>
+          <p><b>Supported field scope:</b> BioMax user ID (PIN), display name and standard user privilege. Department, designation, email, phone, joining date and employment status remain GSONS-only.</p>
+        </div>
+        <div className="device-sync-queue-metrics">
+          <div><span>Awaiting collector</span><strong>{waitingJobs}</strong></div>
+          <div><span>Blocked / manual review</span><strong>{blockedJobs}</strong></div>
+          <div><span>Device acknowledged</span><strong>{completedJobs}</strong></div>
+          <div><span>Recent jobs shown</span><strong>{jobs.length}</strong></div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Created</th><th>Direction</th><th>Entity</th><th>Operation</th><th>Status</th><th>Attempts</th><th>Details</th></tr></thead>
+            <tbody>
+              {jobs.map((job) => (
+                <tr key={job.id}>
+                  <td>{dateTime(job.created_at)}</td>
+                  <td>{label(job.direction)}</td>
+                  <td>{label(job.entity_type)}</td>
+                  <td>{label(job.operation)}</td>
+                  <td><span className={'sync-job-state sync-job-' + job.status}>{label(job.status)}</span></td>
+                  <td>{job.attempt_count}</td>
+                  <td>{job.last_error || (job.status === 'pending' ? 'Queued; awaiting command-capable collector' : job.status === 'completed' ? 'Device acknowledgement recorded' : job.status === 'processing' ? 'Collector has claimed this job' : 'No additional details')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!jobs.length && <div className="module-empty">No employee or attendance synchronization jobs have been generated yet.</div>}
+        </div>
+        <p className="module-footnote">Approved attendance corrections are never written over the original BioMax punch. The published PUSH SDK does not document an individual ATTLOG update command; these items remain blocked in this queue and the approved adjustment continues to be used by GSONS attendance calculations.</p>
       </section>
 
       <section className="device-card-grid">

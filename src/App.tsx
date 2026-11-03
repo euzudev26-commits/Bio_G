@@ -16,6 +16,7 @@ type ShiftRow = { id: string; shift_code: string; shift_name: string; start_time
 type RequestRow = { id: string; employee_id: string; attendance_date: string; target_punch: string; original_time: string | null; requested_time: string; reason: string; status: string; submitted_at: string; admin_note: string | null };
 type DeviceRow = { id: string; device_name: string; serial_number: string; is_active: boolean; last_seen_at: string | null; site_name: string | null; ip_address: string | null };
 type SyncRunRow = { id: string; run_type: string; started_at: string; completed_at: string | null; status: string; records_seen: number; records_inserted: number; records_duplicate: number; records_failed: number; last_error: string | null };
+type DeviceSyncJobRow = { id: string; device_id: string | null; direction: string; entity_type: string; entity_id: string | null; operation: string; status: string; payload: Record<string, unknown> | null; attempt_count: number; last_error: string | null; created_at: string; updated_at: string; completed_at: string | null };
 type RecalcTotals = { input_events: number; valid_employee_events: number; employee_days: number; present_days: number; incomplete_days: number; pending_current_days: number; days_with_intermediate_punches: number; unassigned_events: number; invalid_events: number };
 type RecalcPreviewRow = { employee_id: string | null; employee_code: string | null; employee_name: string | null; biomax_user_id: string; attendance_date: string; punch_count: number; first_in_at: string | null; last_out_at: string | null; status: string; late_minutes: number | null; early_leave_minutes: number | null; issue_codes: string[] };
 type RecalcResponse = { ok: boolean; action: 'preview' | 'apply'; persisted: boolean; date_range: { start_date: string; end_date: string }; totals?: RecalcTotals; preview_rows?: RecalcPreviewRow[]; preview_rows_limit?: number; unassigned_event_samples?: unknown[]; invalid_event_samples?: unknown[]; summaries_written?: number; protected_days_skipped?: number; working_minutes_calculated?: boolean; note?: string; error?: string };
@@ -50,6 +51,7 @@ export default function App() {
   const [requests, setRequests] = useState<RequestRow[]>([]);
   const [devices, setDevices] = useState<DeviceRow[]>([]);
   const [syncRuns, setSyncRuns] = useState<SyncRunRow[]>([]);
+  const [deviceSyncJobs, setDeviceSyncJobs] = useState<DeviceSyncJobRow[]>([]);
   const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [registerStartDate, setRegisterStartDate] = useState(daysAgo(6));
@@ -88,14 +90,15 @@ export default function App() {
       if (role === 'admin') {
         const [year, month, day] = date.split('-').map(Number);
         const trendStart = new Date(Date.UTC(year, month - 1, day - 6)).toISOString().slice(0, 10);
-        const [emp, att, req, shift, week, deviceRows, runs] = await Promise.all([
+        const [emp, att, req, shift, week, deviceRows, runs, jobs] = await Promise.all([
           supabase.from('employees').select('id, employee_code, full_name, department, designation, biomax_user_id, employment_status, email, phone, joined_on, auth_user_id').order('full_name'),
           supabase.from('attendance_daily_summaries').select('*').eq('attendance_date', date).order('first_in_at'),
           supabase.from('attendance_correction_requests').select('*').order('submitted_at', { ascending: false }).limit(100),
           supabase.from('shifts').select('id, shift_code, shift_name, start_time, end_time, grace_minutes, scheduled_break_minutes, break_deduction_mode, working_days, weekly_off_days').eq('shift_code', 'GS-01').maybeSingle(),
           supabase.from('attendance_daily_summaries').select('id, employee_id, attendance_date, first_in_at, last_out_at, status, working_minutes, late_minutes, early_leave_minutes, manual_break_minutes, manual_break_recorded_at, manual_break_note, issue_codes').gte('attendance_date', trendStart).lte('attendance_date', date).order('attendance_date'),
           supabase.from('attendance_devices').select('id, device_name, serial_number, is_active, last_seen_at, site_name, ip_address').order('device_name'),
-          supabase.from('collector_sync_runs').select('id, run_type, started_at, completed_at, status, records_seen, records_inserted, records_duplicate, records_failed, last_error').order('started_at', { ascending: false }).limit(25)
+          supabase.from('collector_sync_runs').select('id, run_type, started_at, completed_at, status, records_seen, records_inserted, records_duplicate, records_failed, last_error').order('started_at', { ascending: false }).limit(25),
+          supabase.from('device_sync_jobs').select('id, device_id, direction, entity_type, entity_id, operation, status, payload, attempt_count, last_error, created_at, updated_at, completed_at').order('created_at', { ascending: false }).limit(50)
         ]);
         if (emp.error) throw emp.error;
         if (att.error) throw att.error;
@@ -104,6 +107,7 @@ export default function App() {
         if (week.error) throw week.error;
         if (deviceRows.error) throw deviceRows.error;
         if (runs.error) throw runs.error;
+        if (jobs.error) throw jobs.error;
         setEmployees((emp.data ?? []) as Profile[]);
         setRows((att.data ?? []) as DayRow[]);
         setRequests((req.data ?? []) as RequestRow[]);
@@ -111,6 +115,7 @@ export default function App() {
         setWeeklyRows((week.data ?? []) as DayRow[]);
         setDevices((deviceRows.data ?? []) as DeviceRow[]);
         setSyncRuns((runs.data ?? []) as SyncRunRow[]);
+        setDeviceSyncJobs((jobs.data ?? []) as DeviceSyncJobRow[]);
       } else if (p) {
         const [att, req] = await Promise.all([
           supabase.from('attendance_daily_summaries').select('*').eq('employee_id', p.id).order('attendance_date', { ascending: false }).limit(90),
@@ -393,7 +398,7 @@ export default function App() {
           <p>{recalcResult.note}</p>
         </div>}
       </>}
-      {tab === 'devices' && role === 'admin' && <DeviceMonitoring devices={devices} syncRuns={syncRuns} refreshing={refreshing} onRefresh={() => loadData().catch((e: Error) => setError(e.message))} />}
+      {tab === 'devices' && role === 'admin' && <DeviceMonitoring devices={devices} syncRuns={syncRuns} jobs={deviceSyncJobs} refreshing={refreshing} onRefresh={() => loadData().catch((e: Error) => setError(e.message))} />}
       {['reports','profile'].includes(tab) && <div className="panel"><h2>{tab.charAt(0).toUpperCase() + tab.slice(1)} setup is next</h2><p>This section will be activated after the reporting and employee self-service phases are completed.</p></div>}
       </section>
     </main>
