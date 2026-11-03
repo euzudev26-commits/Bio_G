@@ -3,8 +3,13 @@ import type { FormEvent } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 import AdminDashboard from './components/AdminDashboard';
+import EmployeeManagement from './components/EmployeeManagement';
+import type { EmployeeInput } from './components/EmployeeManagement';
+import AttendanceRegister from './components/AttendanceRegister';
+import type { PunchEvent } from './components/AttendanceRegister';
+import DeviceMonitoring from './components/DeviceMonitoring';
 
-type Profile = { id: string; employee_code: string; full_name: string; department: string | null; designation: string | null; biomax_user_id: string | null; employment_status: string };
+type Profile = { id: string; employee_code: string; full_name: string; department: string | null; designation: string | null; biomax_user_id: string | null; employment_status: string; email: string | null; phone: string | null; joined_on: string | null; auth_user_id: string | null };
 type DayRow = { id: string; employee_id: string; attendance_date: string; first_in_at: string | null; last_out_at: string | null; status: string; working_minutes: number | null; late_minutes: number | null; early_leave_minutes: number | null; manual_break_minutes: number | null; manual_break_recorded_at: string | null; manual_break_note: string | null; issue_codes: string[] | null };
 type ShiftRow = { id: string; shift_code: string; shift_name: string; start_time: string; end_time: string; grace_minutes: number; scheduled_break_minutes: number; break_deduction_mode: string; working_days: number[]; weekly_off_days: number[]; effective_from?: string };
 type RequestRow = { id: string; employee_id: string; attendance_date: string; target_punch: string; original_time: string | null; requested_time: string; reason: string; status: string; submitted_at: string; admin_note: string | null };
@@ -16,6 +21,16 @@ type RecalcResponse = { ok: boolean; action: 'preview' | 'apply'; persisted: boo
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const showTime = (v: string | null) => v ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }).format(new Date(v)) : '—';
 const showDate = (v: string) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(v + 'T00:00:00+05:30'));
+const daysAgo = (days: number) => {
+  const [year, month, day] = today().split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day - days));
+  return date.toISOString().slice(0, 10);
+};
+const nextDate = (value: string) => {
+  const date = new Date(value + 'T00:00:00Z');
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+};
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -36,6 +51,14 @@ export default function App() {
   const [syncRuns, setSyncRuns] = useState<SyncRunRow[]>([]);
   const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [registerStartDate, setRegisterStartDate] = useState(daysAgo(6));
+  const [registerEndDate, setRegisterEndDate] = useState(today());
+  const [registerAppliedRange, setRegisterAppliedRange] = useState({ start: daysAgo(6), end: today() });
+  const [registerRows, setRegisterRows] = useState<DayRow[]>([]);
+  const [registerLoading, setRegisterLoading] = useState(false);
+  const [punchRow, setPunchRow] = useState<DayRow | null>(null);
+  const [punchEvents, setPunchEvents] = useState<PunchEvent[]>([]);
+  const [punchLoading, setPunchLoading] = useState(false);
   const [generalShift, setGeneralShift] = useState<ShiftRow | null>(null);
   const [targetPunch, setTargetPunch] = useState('IN');
   const [requestedTime, setRequestedTime] = useState('');
@@ -58,20 +81,20 @@ export default function App() {
     setRefreshing(true);
     setError('');
     try {
-      const { data: p, error: pError } = await supabase.from('employees').select('id, employee_code, full_name, department, designation, biomax_user_id, employment_status').eq('auth_user_id', session.user.id).maybeSingle();
+      const { data: p, error: pError } = await supabase.from('employees').select('id, employee_code, full_name, department, designation, biomax_user_id, employment_status, email, phone, joined_on, auth_user_id').eq('auth_user_id', session.user.id).maybeSingle();
       if (pError) throw pError;
       setProfile(p as Profile | null);
       if (role === 'admin') {
         const [year, month, day] = date.split('-').map(Number);
         const trendStart = new Date(Date.UTC(year, month - 1, day - 6)).toISOString().slice(0, 10);
         const [emp, att, req, shift, week, deviceRows, runs] = await Promise.all([
-          supabase.from('employees').select('id, employee_code, full_name, department, designation, biomax_user_id, employment_status').order('full_name'),
+          supabase.from('employees').select('id, employee_code, full_name, department, designation, biomax_user_id, employment_status, email, phone, joined_on, auth_user_id').order('full_name'),
           supabase.from('attendance_daily_summaries').select('*').eq('attendance_date', date).order('first_in_at'),
           supabase.from('attendance_correction_requests').select('*').order('submitted_at', { ascending: false }).limit(100),
           supabase.from('shifts').select('id, shift_code, shift_name, start_time, end_time, grace_minutes, scheduled_break_minutes, break_deduction_mode, working_days, weekly_off_days').eq('shift_code', 'GS-01').maybeSingle(),
           supabase.from('attendance_daily_summaries').select('id, employee_id, attendance_date, first_in_at, last_out_at, status, working_minutes, late_minutes, early_leave_minutes, manual_break_minutes, manual_break_recorded_at, manual_break_note, issue_codes').gte('attendance_date', trendStart).lte('attendance_date', date).order('attendance_date'),
           supabase.from('attendance_devices').select('id, device_name, serial_number, is_active, last_seen_at, site_name, ip_address').order('device_name'),
-          supabase.from('collector_sync_runs').select('id, run_type, started_at, completed_at, status, records_seen, records_inserted, records_duplicate, records_failed, last_error').order('started_at', { ascending: false }).limit(5)
+          supabase.from('collector_sync_runs').select('id, run_type, started_at, completed_at, status, records_seen, records_inserted, records_duplicate, records_failed, last_error').order('started_at', { ascending: false }).limit(25)
         ]);
         if (emp.error) throw emp.error;
         if (att.error) throw att.error;
@@ -112,6 +135,89 @@ export default function App() {
     }, 60_000);
     return () => window.clearInterval(timer);
   }, [loadData, role, tab]);
+
+  const loadAttendanceRegister = useCallback(async (start: string, end: string) => {
+    if (!supabase || !session || role !== 'admin') return;
+    if (!start || !end || start > end) {
+      setError('Choose a valid attendance date range.');
+      return;
+    }
+    const rangeDays = Math.round((Date.parse(end + 'T00:00:00Z') - Date.parse(start + 'T00:00:00Z')) / 86_400_000) + 1;
+    if (rangeDays > 31) {
+      setError('For performance, choose a maximum 31-day range at a time.');
+      return;
+    }
+    setRegisterLoading(true);
+    setError('');
+    try {
+      const { data, error: queryError } = await supabase
+        .from('attendance_daily_summaries')
+        .select('*')
+        .gte('attendance_date', start)
+        .lte('attendance_date', end)
+        .order('attendance_date', { ascending: false })
+        .order('first_in_at', { ascending: true })
+        .limit(1000);
+      if (queryError) throw queryError;
+      setRegisterRows((data ?? []) as DayRow[]);
+    } finally {
+      setRegisterLoading(false);
+    }
+  }, [session, role]);
+
+  useEffect(() => {
+    if (role === 'admin' && tab === 'attendance') {
+      loadAttendanceRegister(registerAppliedRange.start, registerAppliedRange.end)
+        .catch((e: Error) => setError(e.message));
+    }
+  }, [loadAttendanceRegister, registerAppliedRange, role, tab]);
+
+  async function loadPunchDetails(row: DayRow) {
+    if (!supabase || role !== 'admin') return;
+    setPunchRow(row);
+    setPunchEvents([]);
+    setPunchLoading(true);
+    setError('');
+    try {
+      const fromUtc = new Date(row.attendance_date + 'T00:00:00+05:30').toISOString();
+      const toUtc = new Date(nextDate(row.attendance_date) + 'T00:00:00+05:30').toISOString();
+      const { data, error: queryError } = await supabase
+        .from('raw_punch_events')
+        .select('id, biomax_user_id, occurred_at, raw_in_out, io_mode, verify_mode, door_mode, source_channel')
+        .eq('employee_id', row.employee_id)
+        .gte('occurred_at', fromUtc)
+        .lt('occurred_at', toUtc)
+        .order('occurred_at', { ascending: true })
+        .limit(250);
+      if (queryError) throw queryError;
+      setPunchEvents((data ?? []) as PunchEvent[]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Original punch history could not be loaded.');
+    } finally {
+      setPunchLoading(false);
+    }
+  }
+
+  async function saveEmployee(id: string | null, value: EmployeeInput) {
+    if (!supabase || role !== 'admin') throw new Error('Only Admin / HR can save employee profiles.');
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = id
+        ? await supabase.from('employees').update(value).eq('id', id).select('id').single()
+        : await supabase.from('employees').insert(value).select('id').single();
+      if (result.error) throw result.error;
+      setNotice(id ? 'Employee profile updated successfully.' : 'Employee profile created successfully.');
+      await loadData();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Employee profile could not be saved.';
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function signIn(e: FormEvent) {
     e.preventDefault(); if (!supabase) return;
@@ -216,6 +322,9 @@ export default function App() {
     if (saveError) { setError(saveError.message); return; }
     setNotice('Manual break saved. Net working minutes and the HR audit entry were updated.');
     await loadData();
+    if (role === 'admin' && tab === 'attendance') {
+      await loadAttendanceRegister(registerAppliedRange.start, registerAppliedRange.end);
+    }
   }
 
   if (!isSupabaseConfigured) return <div className="setup"><b>G</b><h1>Connect GSONS Attendance</h1><p>Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in the deployment environment.</p></div>;
@@ -237,8 +346,9 @@ export default function App() {
       <section className="content">{error && <div className="error">{error}<button onClick={() => setError('')}>×</button></div>}{notice && <div className="notice">{notice}<button onClick={() => setNotice('')}>×</button></div>}
       {tab === 'overview' && role === 'admin' && <AdminDashboard employees={employees} rows={rows} weeklyRows={weeklyRows} requests={requests} devices={devices} syncRuns={syncRuns} selectedDate={date} lastRefreshed={lastRefreshed} refreshing={refreshing} onDateChange={setDate} onRefresh={() => loadData().catch((e: Error) => setError(e.message))} onNavigate={setTab} />}
       {tab === 'overview' && role === 'employee' && <><h1>{`Welcome, ${profile?.full_name ?? 'Employee'}`}</h1><p className="muted">Your attendance summary · Asia/Kolkata</p><div className="stats"><article><small>Your records</small><strong>{rows.length}</strong></article><article><small>Present in loaded records</small><strong>{present}</strong></article><article><small>Pending corrections</small><strong>{pending}</strong></article><article><small>Attendance date</small><strong>{showDate(date)}</strong></article></div><h2>Recent attendance</h2><AttendanceTable rows={rows.slice(0, 12)} people={employeeById} showEmployee={false} /></>}
-      {tab === 'attendance' && <><h1>Attendance records</h1>{role === 'admin' && <label className="date-select">Date <input type="date" value={date} onChange={e => setDate(e.target.value)} /></label>}<AttendanceTable rows={rows} people={employeeById} showEmployee={role === 'admin'} onRecordManualBreak={role === 'admin' ? recordManualBreak : undefined} /></>}
-      {tab === 'employees' && role === 'admin' && <><h1>Employees</h1><p className="muted">Employee profiles and BioMax user-ID mapping.</p><div className="table-wrap"><table><thead><tr><th>Name</th><th>Employee code</th><th>BioMax ID</th><th>Department</th><th>Status</th></tr></thead><tbody>{employees.map(e => <tr key={e.id}><td>{e.full_name}</td><td>{e.employee_code}</td><td>{e.biomax_user_id ?? 'Not linked'}</td><td>{e.department ?? '—'}</td><td>{e.employment_status}</td></tr>)}</tbody></table></div></>}
+      {tab === 'attendance' && role === 'admin' && <AttendanceRegister employees={employees} rows={registerRows} startDate={registerStartDate} endDate={registerEndDate} loading={registerLoading} punchRow={punchRow} punchEvents={punchEvents} punchLoading={punchLoading} onStartDateChange={setRegisterStartDate} onEndDateChange={setRegisterEndDate} onApply={() => setRegisterAppliedRange({ start: registerStartDate, end: registerEndDate })} onViewPunches={loadPunchDetails} onClosePunches={() => { setPunchRow(null); setPunchEvents([]); }} onRecordManualBreak={recordManualBreak} />}
+      {tab === 'attendance' && role === 'employee' && <><h1>My attendance</h1><p className="muted">Your recent attendance records · Asia/Kolkata</p><AttendanceTable rows={rows} people={employeeById} showEmployee={false} /></>}
+      {tab === 'employees' && role === 'admin' && <EmployeeManagement employees={employees} saving={busy} onSave={saveEmployee} onRefresh={() => loadData().catch((e: Error) => setError(e.message))} />}
       {tab === 'correction' && role === 'employee' && <><h1>Request attendance correction</h1><p className="muted">Your request goes to Admin / HR for review. Original biometric events remain unchanged.</p><form className="panel form" onSubmit={submitCorrection}><label>Attendance date<input type="date" value={date} onChange={e => setDate(e.target.value)} required /></label><label>Punch to correct<select value={targetPunch} onChange={e => setTargetPunch(e.target.value)}><option value="IN">IN punch</option><option value="OUT">OUT punch</option></select></label><label>Requested date and time<input type="datetime-local" value={requestedTime} onChange={e => setRequestedTime(e.target.value)} required /></label><label>Reason<textarea rows={4} maxLength={500} value={reason} onChange={e => setReason(e.target.value)} required /></label><button disabled={busy}>{busy ? 'Submitting…' : 'Submit request'}</button></form></>}
       {tab === 'requests' && <><h1>{role === 'admin' ? 'Correction requests' : 'My correction requests'}</h1><div className="table-wrap"><table><thead><tr><th>Date</th><th>Punch</th><th>Original</th><th>Requested</th><th>Reason</th><th>Status</th>{role === 'admin' && <th>Action</th>}</tr></thead><tbody>{requests.map(r => <tr key={r.id}><td>{showDate(r.attendance_date)}</td><td>{r.target_punch}</td><td>{showTime(r.original_time)}</td><td>{showTime(r.requested_time)}</td><td>{r.reason}</td><td><span className={'pill ' + r.status}>{r.status}</span>{r.admin_note && <small>{r.admin_note}</small>}</td>{role === 'admin' && <td>{r.status === 'pending' ? <div className="actions"><button onClick={() => reviewRequest(r.id,'approved')}>Approve</button><button className="reject" onClick={() => reviewRequest(r.id,'rejected')}>Reject</button></div> : 'Reviewed'}</td>}</tr>)}</tbody></table>{!requests.length && <p className="empty">No correction requests found.</p>}</div></>}
       {tab === 'shifts' && role === 'admin' && <><h1>Shift & attendance policy</h1><p className="muted">Active company shift and break recording rules.</p>{generalShift ? <div className="panel shift-policy"><div className="policy-heading"><div><small>ACTIVE SHIFT</small><h2>{generalShift.shift_name}</h2><strong>{generalShift.shift_code}</strong></div><span className="pill approved">Active</span></div><div className="policy-grid"><div><small>Shift timing</small><strong>{generalShift.start_time.slice(0,5)} – {generalShift.end_time.slice(0,5)}</strong></div><div><small>Late grace</small><strong>{generalShift.grace_minutes} minutes</strong></div><div><small>Scheduled break reference</small><strong>{generalShift.scheduled_break_minutes} minutes</strong></div><div><small>Break deduction</small><strong>{generalShift.break_deduction_mode === 'manual' ? 'Manual HR entry' : 'Automatic'}</strong></div><div><small>Working days</small><strong>Monday – Saturday</strong></div><div><small>Weekly off</small><strong>Sunday</strong></div><div><small>Effective from</small><strong>23 Dec 2025</strong></div><div><small>Net working time</small><strong>Only after break entry</strong></div></div><p className="muted policy-note">No 60-minute break is deducted by default. HR records the actual break duration on each completed attendance day. Employee joining dates remain blank and no absence is created before a verified joining date.</p></div> : <div className="panel"><p>GS-01 shift is not available.</p></div>}<div className="panel"><h2>Manual break procedure</h2><p>Open Attendance, select a date, and use Record break for an employee with both IN and OUT punches. Saving a break updates net working minutes and writes an audit entry showing the HR user, time, and note. Raw BioMax punches are never changed.</p></div></>}
@@ -284,7 +394,8 @@ export default function App() {
           <p>{recalcResult.note}</p>
         </div>}
       </>}
-      {['devices','reports','profile'].includes(tab) && <div className="panel"><h2>{tab.charAt(0).toUpperCase() + tab.slice(1)} setup is next</h2><p>This section will be activated after device collection and remaining employee onboarding tasks are completed.</p></div>}
+      {tab === 'devices' && role === 'admin' && <DeviceMonitoring devices={devices} syncRuns={syncRuns} refreshing={refreshing} onRefresh={() => loadData().catch((e: Error) => setError(e.message))} />}
+      {['reports','profile'].includes(tab) && <div className="panel"><h2>{tab.charAt(0).toUpperCase() + tab.slice(1)} setup is next</h2><p>This section will be activated after the reporting and employee self-service phases are completed.</p></div>}
       </section>
     </main>
   </div>;
