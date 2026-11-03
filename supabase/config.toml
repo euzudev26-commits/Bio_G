@@ -6,3 +6,7 @@ verify_jwt = true
 # Authenticates with x-gsons-collector-token; token hash is device scoped.
 [functions.biomax-ingest]
 verify_jwt = false
+
+# This function validates either an Admin session JWT or a device-scoped collector token in its handler.
+[functions.attendance-recalculate]
+verify_jwt = false
