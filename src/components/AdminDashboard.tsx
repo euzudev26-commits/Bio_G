@@ -167,7 +167,6 @@ export default function AdminDashboard({
   const checkedInIds = new Set(rows.filter((row) => row.first_in_at).map((row) => row.employee_id));
   const checkedIn = checkedInIds.size;
   const notRecorded = Math.max(0, activeEmployees.length - checkedIn);
-  const present = rows.filter((row) => row.status === 'present').length;
   const incomplete = rows.filter((row) => row.status === 'incomplete').length;
   const pendingDay = rows.filter((row) => row.status === 'pending').length;
   const late = rows.filter((row) => (row.late_minutes ?? 0) > 0).length;
