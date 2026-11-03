@@ -49,3 +49,16 @@ Indigo returned HTTP 200 and `response_code: OK` for the observed event. The tok
 ## Not yet implemented
 
 The Windows collector, local queue, historical-import worker, event deduplication code and reconciliation processor are still to be built and tested. The device has not been reconfigured as part of this database setup.
+
+
+## Two-way synchronization foundation (2026-11-03)
+
+The current registered device is the N-MULTIBIO900 / Multibio 900, serial `AMDB25093800050`, firmware `K8D_3Y3Kbio030_3.2`, TCP `192.168.1.241:5005`. Existing Indigo event destination is preserved.
+
+The new database outbox records employee inserts and changes to name or BioMax ID as `upsert_userinfo` jobs. It only includes verified USERINFO fields `PIN`, `Name` and normal-user privilege. GSONS-only fields (employee code, department, designation, email, phone, joining date, employment status) are not misrepresented as device fields.
+
+A server-side collector API is available at `biomax-device-sync` for token-authenticated heartbeat, job claim/finish and basic inbound employee identity import. The Windows collector currently installed does not yet call this API or execute outbound jobs.
+
+**Transport separation:** the existing raw TCP JSON API on port 5005 is verified for `GetDeviceInfo` and `GetLogDataPage`. The PUSH SDK uses a separate HTTP device-poll/command-reply channel. Do not send a PUSH command string over the raw TCP socket or change the configured Indigo destination to test it.
+
+**Attendance correction boundary:** GSONS retains the original punch in `raw_punch_events` and approved changes in `attendance_adjustments`. The reviewed PUSH command set has attendance-log query and whole-log clear operations but no individual ATTLOG update. A correction is therefore visible as a blocked device-sync job and is not reported as written to BioMax.
