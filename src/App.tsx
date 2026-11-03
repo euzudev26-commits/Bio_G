@@ -7,6 +7,9 @@ type Profile = { id: string; employee_code: string; full_name: string; departmen
 type DayRow = { id: string; employee_id: string; attendance_date: string; first_in_at: string | null; last_out_at: string | null; status: string; working_minutes: number | null; late_minutes: number | null; early_leave_minutes: number | null; manual_break_minutes: number | null; manual_break_recorded_at: string | null; manual_break_note: string | null; issue_codes: string[] | null };
 type ShiftRow = { id: string; shift_code: string; shift_name: string; start_time: string; end_time: string; grace_minutes: number; scheduled_break_minutes: number; break_deduction_mode: string; working_days: number[]; weekly_off_days: number[]; effective_from?: string };
 type RequestRow = { id: string; employee_id: string; attendance_date: string; target_punch: string; original_time: string | null; requested_time: string; reason: string; status: string; submitted_at: string; admin_note: string | null };
+type RecalcTotals = { input_events: number; valid_employee_events: number; employee_days: number; present_days: number; incomplete_days: number; pending_current_days: number; days_with_intermediate_punches: number; unassigned_events: number; invalid_events: number };
+type RecalcPreviewRow = { employee_id: string | null; employee_code: string | null; employee_name: string | null; biomax_user_id: string; attendance_date: string; punch_count: number; first_in_at: string | null; last_out_at: string | null; status: string; late_minutes: number | null; early_leave_minutes: number | null; issue_codes: string[] };
+type RecalcResponse = { ok: boolean; action: 'preview' | 'apply'; persisted: boolean; date_range: { start_date: string; end_date: string }; totals?: RecalcTotals; preview_rows?: RecalcPreviewRow[]; preview_rows_limit?: number; unassigned_event_samples?: unknown[]; invalid_event_samples?: unknown[]; summaries_written?: number; protected_days_skipped?: number; working_minutes_calculated?: boolean; note?: string; error?: string };
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const showTime = (v: string | null) => v ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }).format(new Date(v)) : '—';
 const showDate = (v: string) => new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(v + 'T00:00:00+05:30'));
@@ -29,6 +32,10 @@ export default function App() {
   const [targetPunch, setTargetPunch] = useState('IN');
   const [requestedTime, setRequestedTime] = useState('');
   const [reason, setReason] = useState('');
+  const [recalcStartDate, setRecalcStartDate] = useState('2026-10-27');
+  const [recalcEndDate, setRecalcEndDate] = useState(today());
+  const [recalcPreview, setRecalcPreview] = useState<RecalcResponse | null>(null);
+  const [recalcResult, setRecalcResult] = useState<RecalcResponse | null>(null);
   const role = session?.user.app_metadata?.role === 'admin' ? 'admin' : session?.user.app_metadata?.role === 'employee' ? 'employee' : null;
 
   useEffect(() => {
@@ -91,6 +98,57 @@ export default function App() {
     setNotice(`Request ${decision}. Adjustment and audit entry recorded.`); await loadData();
   }
 
+  async function runAttendanceRecalculation(action: 'preview' | 'apply') {
+    if (!supabase) return;
+    if (!recalcStartDate || !recalcEndDate || recalcStartDate > recalcEndDate) {
+      setError('Choose a valid attendance date range.');
+      return;
+    }
+    if (action === 'apply') {
+      if (!recalcPreview || recalcPreview.date_range.start_date !== recalcStartDate || recalcPreview.date_range.end_date !== recalcEndDate) {
+        setError('Run a fresh preview for the selected dates before applying.');
+        return;
+      }
+      if ((recalcPreview.totals?.invalid_events ?? 0) > 0) {
+        setError('Apply is blocked because the preview contains invalid raw events. Review the event samples first.');
+        return;
+      }
+      if (!window.confirm(
+        'Apply the reviewed attendance calculation for ' + showDate(recalcStartDate) + ' to ' + showDate(recalcEndDate) + '?\n\nOnly derived attendance summaries will be rebuilt. Raw BioMax punches will not be changed. Approved corrections, leave / holiday / weekly-off entries, and recorded manual breaks are protected.'
+      )) return;
+    }
+
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const body: Record<string, unknown> = {
+        start_date: recalcStartDate,
+        end_date: recalcEndDate,
+        action,
+      };
+      if (action === 'apply') body.confirm_apply = 'REBUILD_DERIVED_SUMMARIES';
+      const { data, error: invokeError } = await supabase.functions.invoke('attendance-recalculate', { body });
+      if (invokeError) throw invokeError;
+      const result = data as RecalcResponse;
+      if (!result?.ok) throw new Error(result?.error ?? 'Attendance recalculation did not complete.');
+      if (action === 'preview') {
+        setRecalcPreview(result);
+        setRecalcResult(null);
+        setNotice('Preview completed. No attendance summaries have been changed yet.');
+      } else {
+        setRecalcResult(result);
+        setRecalcPreview(null);
+        setNotice('Attendance summaries updated. Raw biometric history remains unchanged.');
+        await loadData();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Attendance recalculation failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function recordManualBreak(row: DayRow) {
     if (!supabase) return;
     if (!row.first_in_at || !row.last_out_at) {
@@ -131,7 +189,7 @@ export default function App() {
 
   return <div className="shell">
     <aside><div className="brand"><b>G</b><span><strong>GSONS</strong><small>ATTENDANCE MANAGER</small></span></div><p className="role-label">{role === 'admin' ? 'ADMIN PORTAL' : 'EMPLOYEE PORTAL'}</p>
-      <nav>{(role === 'admin' ? [['overview','Overview'],['attendance','Attendance'],['employees','Employees'],['requests','Correction requests'],['devices','Biometric devices'],['shifts','Shifts & policies'],['reports','Reports']] : [['overview','My overview'],['attendance','My attendance'],['correction','Request correction'],['requests','My requests'],['profile','My profile']]).map(([id,label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}{id === 'requests' && role === 'admin' && pending > 0 && <i>{pending}</i>}</button>)}</nav>
+      <nav>{(role === 'admin' ? [['overview','Overview'],['attendance','Attendance'],['employees','Employees'],['requests','Correction requests'],['devices','Biometric devices'],['recalculate','Recalculate'],['shifts','Shifts & policies'],['reports','Reports']] : [['overview','My overview'],['attendance','My attendance'],['correction','Request correction'],['requests','My requests'],['profile','My profile']]).map(([id,label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}{id === 'requests' && role === 'admin' && pending > 0 && <i>{pending}</i>}</button>)}</nav>
       <footer><span>● Supabase connected</span><small>GSONS Industries Private Limited</small></footer>
     </aside>
     <main><header><div><small>{role === 'admin' ? 'WORKSPACE' : 'SELF SERVICE'} /</small><strong>{tab.charAt(0).toUpperCase() + tab.slice(1)}</strong></div><div className="user"><span>{session.user.email}</span><button onClick={signOut}>Sign out</button></div></header>
@@ -142,6 +200,48 @@ export default function App() {
       {tab === 'correction' && role === 'employee' && <><h1>Request attendance correction</h1><p className="muted">Your request goes to Admin / HR for review. Original biometric events remain unchanged.</p><form className="panel form" onSubmit={submitCorrection}><label>Attendance date<input type="date" value={date} onChange={e => setDate(e.target.value)} required /></label><label>Punch to correct<select value={targetPunch} onChange={e => setTargetPunch(e.target.value)}><option value="IN">IN punch</option><option value="OUT">OUT punch</option></select></label><label>Requested date and time<input type="datetime-local" value={requestedTime} onChange={e => setRequestedTime(e.target.value)} required /></label><label>Reason<textarea rows={4} maxLength={500} value={reason} onChange={e => setReason(e.target.value)} required /></label><button disabled={busy}>{busy ? 'Submitting…' : 'Submit request'}</button></form></>}
       {tab === 'requests' && <><h1>{role === 'admin' ? 'Correction requests' : 'My correction requests'}</h1><div className="table-wrap"><table><thead><tr><th>Date</th><th>Punch</th><th>Original</th><th>Requested</th><th>Reason</th><th>Status</th>{role === 'admin' && <th>Action</th>}</tr></thead><tbody>{requests.map(r => <tr key={r.id}><td>{showDate(r.attendance_date)}</td><td>{r.target_punch}</td><td>{showTime(r.original_time)}</td><td>{showTime(r.requested_time)}</td><td>{r.reason}</td><td><span className={'pill ' + r.status}>{r.status}</span>{r.admin_note && <small>{r.admin_note}</small>}</td>{role === 'admin' && <td>{r.status === 'pending' ? <div className="actions"><button onClick={() => reviewRequest(r.id,'approved')}>Approve</button><button className="reject" onClick={() => reviewRequest(r.id,'rejected')}>Reject</button></div> : 'Reviewed'}</td>}</tr>)}</tbody></table>{!requests.length && <p className="empty">No correction requests found.</p>}</div></>}
       {tab === 'shifts' && role === 'admin' && <><h1>Shift & attendance policy</h1><p className="muted">Active company shift and break recording rules.</p>{generalShift ? <div className="panel shift-policy"><div className="policy-heading"><div><small>ACTIVE SHIFT</small><h2>{generalShift.shift_name}</h2><strong>{generalShift.shift_code}</strong></div><span className="pill approved">Active</span></div><div className="policy-grid"><div><small>Shift timing</small><strong>{generalShift.start_time.slice(0,5)} – {generalShift.end_time.slice(0,5)}</strong></div><div><small>Late grace</small><strong>{generalShift.grace_minutes} minutes</strong></div><div><small>Scheduled break reference</small><strong>{generalShift.scheduled_break_minutes} minutes</strong></div><div><small>Break deduction</small><strong>{generalShift.break_deduction_mode === 'manual' ? 'Manual HR entry' : 'Automatic'}</strong></div><div><small>Working days</small><strong>Monday – Saturday</strong></div><div><small>Weekly off</small><strong>Sunday</strong></div><div><small>Effective from</small><strong>23 Dec 2025</strong></div><div><small>Net working time</small><strong>Only after break entry</strong></div></div><p className="muted policy-note">No 60-minute break is deducted by default. HR records the actual break duration on each completed attendance day. Employee joining dates remain blank and no absence is created before a verified joining date.</p></div> : <div className="panel"><p>GS-01 shift is not available.</p></div>}<div className="panel"><h2>Manual break procedure</h2><p>Open Attendance, select a date, and use Record break for an employee with both IN and OUT punches. Saving a break updates net working minutes and writes an audit entry showing the HR user, time, and note. Raw BioMax punches are never changed.</p></div></>}
+      {tab === 'recalculate' && role === 'admin' && <>
+        <h1>Recalculate attendance</h1>
+        <p className="muted">Rebuild derived daily summaries from the immutable BioMax punch history. Preview first, then apply only after reviewing the result.</p>
+        <div className="panel recalc-panel">
+          <div className="recalc-controls">
+            <label>From date<input type="date" value={recalcStartDate} onChange={e => { setRecalcStartDate(e.target.value); setRecalcPreview(null); setRecalcResult(null); }} /></label>
+            <label>To date<input type="date" value={recalcEndDate} onChange={e => { setRecalcEndDate(e.target.value); setRecalcPreview(null); setRecalcResult(null); }} /></label>
+          </div>
+          <div className="recalc-actions">
+            <button disabled={busy} onClick={() => runAttendanceRecalculation('preview')}>{busy ? 'Processing…' : 'Preview calculation'}</button>
+            {recalcPreview && <button disabled={busy || (recalcPreview.totals?.invalid_events ?? 0) > 0} onClick={() => runAttendanceRecalculation('apply')}>Apply reviewed preview</button>}
+          </div>
+          <p className="muted policy-note">The preview does not write data. Apply updates only derived attendance summaries. Raw punch events, approved correction history, leave / holiday / weekly-off entries and existing manual break entries are preserved. Working minutes remain blank until an actual manual break is recorded. No automatic absence is generated.</p>
+        </div>
+        {recalcPreview && <>
+          <h2>Preview results · {showDate(recalcPreview.date_range.start_date)} – {showDate(recalcPreview.date_range.end_date)}</h2>
+          <div className="stats recalc-stats">
+            <article><small>Raw events checked</small><strong>{recalcPreview.totals?.input_events ?? 0}</strong></article>
+            <article><small>Employee-days</small><strong>{recalcPreview.totals?.employee_days ?? 0}</strong></article>
+            <article><small>Present days</small><strong>{recalcPreview.totals?.present_days ?? 0}</strong></article>
+            <article><small>Incomplete days</small><strong>{recalcPreview.totals?.incomplete_days ?? 0}</strong></article>
+            <article><small>Current-day pending</small><strong>{recalcPreview.totals?.pending_current_days ?? 0}</strong></article>
+            <article><small>Unassigned events</small><strong>{recalcPreview.totals?.unassigned_events ?? 0}</strong></article>
+          </div>
+          {(recalcPreview.totals?.invalid_events ?? 0) > 0 && <div className="error">There are {recalcPreview.totals?.invalid_events} invalid event(s). Applying this preview is disabled until they are reviewed.</div>}
+          <div className="table-wrap"><table><thead><tr><th>Employee</th><th>Date</th><th>Punches</th><th>First IN</th><th>Last OUT</th><th>Late</th><th>Early out</th><th>Status</th></tr></thead><tbody>
+            {(recalcPreview.preview_rows ?? []).slice(0, 100).map((r, i) => <tr key={r.employee_id + '|' + r.attendance_date + '|' + i}>
+              <td>{r.employee_name ?? r.employee_code ?? r.biomax_user_id}</td><td>{showDate(r.attendance_date)}</td><td>{r.punch_count}</td><td>{showTime(r.first_in_at)}</td><td>{showTime(r.last_out_at)}</td><td>{r.late_minutes == null ? '—' : String(r.late_minutes) + ' min'}</td><td>{r.early_leave_minutes == null ? '—' : String(r.early_leave_minutes) + ' min'}</td><td><span className={'pill ' + r.status}>{r.status}</span>{r.issue_codes?.length ? <small>{r.issue_codes.join(', ')}</small> : null}</td>
+            </tr>)}
+          </tbody></table></div>
+          <p className="muted">{recalcPreview.preview_rows_limit ? 'Showing up to ' + recalcPreview.preview_rows_limit + ' preview rows. ' : ''}{recalcPreview.note}</p>
+        </>}
+        {recalcResult && <div className="panel recalc-result">
+          <h2>Recalculation applied</h2>
+          <div className="stats">
+            <article><small>Summaries written</small><strong>{recalcResult.summaries_written ?? 0}</strong></article>
+            <article><small>Protected days skipped</small><strong>{recalcResult.protected_days_skipped ?? 0}</strong></article>
+            <article><small>Employee-days reviewed</small><strong>{recalcResult.totals?.employee_days ?? 0}</strong></article>
+          </div>
+          <p>{recalcResult.note}</p>
+        </div>}
+      </>}
       {['devices','reports','profile'].includes(tab) && <div className="panel"><h2>{tab.charAt(0).toUpperCase() + tab.slice(1)} setup is next</h2><p>This section will be activated after device collection and remaining employee onboarding tasks are completed.</p></div>}
       </section>
     </main>
