@@ -254,7 +254,7 @@ Deno.serve(async (req: Request) => {
     if (finishError) throw finishError;
 
     let attendanceRecalculation: JsonObject | null = null;
-    if (!insertError && failed === 0 && rows.length > 0 && ["reconciliation", "realtime_push"].includes(source)) {
+    if (!insertError && failed === 0 && inserted > 0 && ["reconciliation", "realtime_push"].includes(source)) {
       try {
         const dates = Array.from(new Set(rows.map((row) => localDateOf(String(row.occurred_at))))).sort();
         const recalcResponse = await fetch(`${supabaseUrl}/functions/v1/attendance-recalculate`, {
