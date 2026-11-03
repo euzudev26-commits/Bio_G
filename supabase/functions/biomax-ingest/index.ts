@@ -51,6 +51,17 @@ function localDeviceTime(value: unknown): { raw: string; iso: string } {
   return { raw, iso: parsed.toISOString() };
 }
 
+function localDateOf(value: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(value));
+  const get = (key: string) => parts.find((part) => part.type === key)?.value ?? "";
+  return get("year") + "-" + get("month") + "-" + get("day");
+}
+
 function normaliseUserId(value: unknown): string {
   const id = String(value ?? "").trim();
   if (!id || id.length > 64) throw new Error("Missing or invalid BioMax user ID");
@@ -125,9 +136,28 @@ Deno.serve(async (req: Request) => {
     if (!device || !device.is_active) return reply({ error: "Device is not active or token is assigned to another device" }, 403);
 
     const source = String(body.source_channel ?? "historical_import");
-    if (!["historical_import", "realtime_push", "manual_import"].includes(source)) {
+    if (!["historical_import", "realtime_push", "manual_import", "reconciliation"].includes(source)) {
       return reply({ error: "Invalid source_channel" }, 400);
     }
+
+    // Heartbeats prove the collector is online without inserting a fake punch or
+    // generating a collector_sync_runs row every polling interval.
+    if (body.heartbeat === true) {
+      if (source !== "reconciliation") return reply({ error: "Heartbeat is reserved for the reconciliation collector" }, 400);
+      const now = new Date().toISOString();
+      const { error: heartbeatError } = await admin
+        .from("attendance_devices")
+        .update({ last_seen_at: now })
+        .eq("id", device.id);
+      if (heartbeatError) throw heartbeatError;
+      const { error: tokenTouchError } = await admin
+        .from("collector_api_tokens")
+        .update({ last_used_at: now })
+        .eq("id", tokenRow.id);
+      if (tokenTouchError) throw tokenTouchError;
+      return reply({ ok: true, heartbeat: true, device: deviceSerial, server_time: now });
+    }
+
     const incoming = Array.isArray(body.events) ? body.events : [body.event ?? body];
     if (!incoming.length || incoming.length > 500) return reply({ error: "Send between 1 and 500 events per batch" }, 400);
 
@@ -193,7 +223,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const runType = source === "realtime_push" ? "realtime_forward" : "historical_import";
+    const runType = source === "realtime_push" ? "realtime_forward" : source === "reconciliation" ? "reconciliation" : "historical_import";
     const { data: run, error: runError } = await admin
       .from("collector_sync_runs")
       .insert({ device_id: device.id, run_type: runType, status: "running", records_seen: incoming.length })
@@ -213,7 +243,7 @@ Deno.serve(async (req: Request) => {
     await admin.from("attendance_devices").update({ last_seen_at: new Date().toISOString() }).eq("id", device.id);
     await admin.from("collector_api_tokens").update({ last_used_at: new Date().toISOString() }).eq("id", tokenRow.id);
 
-    const duplicateCount = Math.max(0, rows.length - inserted);
+    const duplicateCount = insertError ? 0 : Math.max(0, rows.length - inserted);
     const status = failed ? (inserted || duplicateCount ? "partial" : "failed") : "completed";
     const { error: finishError } = await admin.from("collector_sync_runs").update({
       completed_at: new Date().toISOString(), status,
@@ -223,8 +253,48 @@ Deno.serve(async (req: Request) => {
     }).eq("id", run.id);
     if (finishError) throw finishError;
 
+    let attendanceRecalculation: JsonObject | null = null;
+    if (!insertError && failed === 0 && rows.length > 0 && ["reconciliation", "realtime_push"].includes(source)) {
+      try {
+        const dates = Array.from(new Set(rows.map((row) => localDateOf(String(row.occurred_at))))).sort();
+        const recalcResponse = await fetch(`${supabaseUrl}/functions/v1/attendance-recalculate`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-gsons-collector-token": token,
+          },
+          body: JSON.stringify({
+            source_channel: source,
+            device_serial: deviceSerial,
+            start_date: dates[0],
+            end_date: dates[dates.length - 1],
+            action: "apply",
+            confirm_apply: "REBUILD_DERIVED_SUMMARIES",
+          }),
+        });
+        const recalcBody = await recalcResponse.json().catch(() => ({})) as JsonObject;
+        attendanceRecalculation = {
+          ok: recalcResponse.ok && recalcBody.ok === true,
+          start_date: dates[0],
+          end_date: dates[dates.length - 1],
+          summaries_written: recalcBody.summaries_written ?? null,
+          protected_days_skipped: recalcBody.protected_days_skipped ?? null,
+          error: recalcResponse.ok ? null : (recalcBody.error ?? "Attendance recalculation endpoint returned HTTP " + recalcResponse.status),
+        };
+        if (!recalcResponse.ok) {
+          console.error("attendance-recalculate was not completed for ingestion run", run.id, recalcResponse.status);
+        }
+      } catch (recalcError) {
+        attendanceRecalculation = {
+          ok: false,
+          error: recalcError instanceof Error ? recalcError.message : "Attendance recalculation request failed",
+        };
+        console.error("attendance-recalculate request failed for ingestion run", run.id);
+      }
+    }
+
     return reply({
-      ok: !insertError,
+      ok: !insertError && failed === 0,
       device: deviceSerial,
       run_id: run.id,
       records_seen: incoming.length,
@@ -235,8 +305,9 @@ Deno.serve(async (req: Request) => {
       employees_unmatched: unmatchedEmployees,
       direction_mapping: "Only explicit IN/OUT text is classified. Numeric and bitmask modes are stored unchanged pending a device-specific verification.",
       errors,
+      ...(attendanceRecalculation ? { attendance_recalculation: attendanceRecalculation } : {}),
       ...(insertError ? { insert_error: insertError } : {}),
-    }, insertError ? 500 : 200);
+    }, insertError ? 500 : failed ? 422 : 200);
   } catch (error) {
     console.error("biomax-ingest error", error);
     return reply({ error: error instanceof Error ? error.message : "Collector ingestion failed" }, 500);

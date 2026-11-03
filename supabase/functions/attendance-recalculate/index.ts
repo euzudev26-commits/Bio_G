@@ -3,7 +3,7 @@ import { deriveDailySummaries, localDateOf } from "./engine.mjs";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-gsons-collector-token",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -25,6 +25,11 @@ function getNamedKey(name: "SUPABASE_PUBLISHABLE_KEYS" | "SUPABASE_SECRET_KEYS")
   const key = parsed.default ?? Object.values(parsed)[0];
   if (typeof key !== "string" || !key) throw new Error("No default key configured in " + name);
   return key;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function validDate(value: unknown): value is string {
@@ -114,26 +119,19 @@ Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return response({ error: "Method not allowed" }, 405);
 
   try {
-    const authHeader = req.headers.get("Authorization") ?? "";
-    const match = authHeader.match(/^Bearer\s+(.+)$/i);
-    if (!match) return response({ error: "Authentication required" }, 401);
-
     const supabaseUrl = requiredEnv("SUPABASE_URL");
     const publishableKey = getNamedKey("SUPABASE_PUBLISHABLE_KEYS");
     const secretKey = getNamedKey("SUPABASE_SECRET_KEYS");
-    const token = match[1];
-
-    const authClient = createClient(supabaseUrl, publishableKey, {
-      global: { headers: { Authorization: "Bearer " + token } },
+    const adminClient = createClient(supabaseUrl, secretKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
-    const { data: authData, error: authError } = await authClient.auth.getUser(token);
-    if (authError || !authData.user) return response({ error: "Invalid or expired session" }, 401);
-    if (authData.user.app_metadata?.role !== "admin") {
-      return response({ error: "Only Admin / HR can recalculate attendance" }, 403);
-    }
 
-    const body = await req.json();
+    let body: any;
+    try {
+      body = await req.json();
+    } catch {
+      return response({ error: "Request body must be valid JSON" }, 400);
+    }
     const startDate = body?.start_date;
     const endDate = body?.end_date;
     const action = String(body?.action ?? "preview").toLowerCase();
@@ -147,9 +145,65 @@ Deno.serve(async (req: Request) => {
       return response({ error: "Applying summaries requires confirm_apply: REBUILD_DERIVED_SUMMARIES" }, 400);
     }
 
-    const adminClient = createClient(supabaseUrl, secretKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
+    // Admin users authenticate with their Supabase access token. The collector path
+    // is separately authenticated using the device-scoped hashed collector token.
+    const collectorToken = req.headers.get("x-gsons-collector-token") ?? "";
+    if (collectorToken) {
+      if (collectorToken.length < 40 || collectorToken.length > 256) {
+        return response({ error: "Invalid collector authentication" }, 401);
+      }
+      const tokenHash = await sha256Hex(collectorToken);
+      const { data: tokenRow, error: tokenError } = await adminClient
+        .from("collector_api_tokens")
+        .select("id, device_id")
+        .eq("token_hash", tokenHash)
+        .eq("is_active", true)
+        .is("revoked_at", null)
+        .maybeSingle();
+      if (tokenError) throw tokenError;
+      if (!tokenRow) return response({ error: "Collector token is not recognised or has been revoked" }, 401);
+
+      const sourceChannel = String(body?.source_channel ?? "");
+      if (!["reconciliation", "realtime_push"].includes(sourceChannel)) {
+        return response({ error: "Collector-triggered recalculation is restricted to reconciliation and realtime_push" }, 403);
+      }
+      if (action !== "apply") {
+        return response({ error: "Collector authentication may only apply a completed ingestion refresh" }, 403);
+      }
+      const deviceSerial = String(body?.device_serial ?? "").trim();
+      if (!deviceSerial) return response({ error: "device_serial is required for collector recalculation" }, 400);
+      const { data: device, error: deviceError } = await adminClient
+        .from("attendance_devices")
+        .select("id, serial_number, is_active")
+        .eq("id", tokenRow.device_id)
+        .eq("serial_number", deviceSerial)
+        .maybeSingle();
+      if (deviceError) throw deviceError;
+      if (!device || !device.is_active) {
+        return response({ error: "Collector token is not assigned to this active device" }, 403);
+      }
+
+      const [sy, sm, sd] = startDate.split("-").map(Number);
+      const [ey, em, ed] = endDate.split("-").map(Number);
+      const rangeDays = Math.round((Date.UTC(ey, em - 1, ed) - Date.UTC(sy, sm - 1, sd)) / 86400000) + 1;
+      if (rangeDays > 31) {
+        return response({ error: "Collector-triggered recalculation is limited to 31 calendar days per request" }, 400);
+      }
+    } else {
+      const authHeader = req.headers.get("Authorization") ?? "";
+      const match = authHeader.match(/^Bearer\s+(.+)$/i);
+      if (!match) return response({ error: "Authentication required" }, 401);
+      const token = match[1];
+      const authClient = createClient(supabaseUrl, publishableKey, {
+        global: { headers: { Authorization: "Bearer " + token } },
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+      const { data: authData, error: authError } = await authClient.auth.getUser(token);
+      if (authError || !authData.user) return response({ error: "Invalid or expired session" }, 401);
+      if (authData.user.app_metadata?.role !== "admin") {
+        return response({ error: "Only Admin / HR can recalculate attendance" }, 403);
+      }
+    }
 
     const { data: employees, error: employeeError } = await adminClient
       .from("employees")
