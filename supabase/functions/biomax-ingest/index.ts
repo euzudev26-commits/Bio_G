@@ -125,9 +125,28 @@ Deno.serve(async (req: Request) => {
     if (!device || !device.is_active) return reply({ error: "Device is not active or token is assigned to another device" }, 403);
 
     const source = String(body.source_channel ?? "historical_import");
-    if (!["historical_import", "realtime_push", "manual_import"].includes(source)) {
+    if (!["historical_import", "realtime_push", "manual_import", "reconciliation"].includes(source)) {
       return reply({ error: "Invalid source_channel" }, 400);
     }
+
+    // Heartbeats prove the collector is online without inserting a fake punch or
+    // generating a collector_sync_runs row every polling interval.
+    if (body.heartbeat === true) {
+      if (source !== "reconciliation") return reply({ error: "Heartbeat is reserved for the reconciliation collector" }, 400);
+      const now = new Date().toISOString();
+      const { error: heartbeatError } = await admin
+        .from("attendance_devices")
+        .update({ last_seen_at: now })
+        .eq("id", device.id);
+      if (heartbeatError) throw heartbeatError;
+      const { error: tokenTouchError } = await admin
+        .from("collector_api_tokens")
+        .update({ last_used_at: now })
+        .eq("id", tokenRow.id);
+      if (tokenTouchError) throw tokenTouchError;
+      return reply({ ok: true, heartbeat: true, device: deviceSerial, server_time: now });
+    }
+
     const incoming = Array.isArray(body.events) ? body.events : [body.event ?? body];
     if (!incoming.length || incoming.length > 500) return reply({ error: "Send between 1 and 500 events per batch" }, 400);
 
@@ -193,7 +212,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const runType = source === "realtime_push" ? "realtime_forward" : "historical_import";
+    const runType = source === "realtime_push" ? "realtime_forward" : source === "reconciliation" ? "reconciliation" : "historical_import";
     const { data: run, error: runError } = await admin
       .from("collector_sync_runs")
       .insert({ device_id: device.id, run_type: runType, status: "running", records_seen: incoming.length })
@@ -213,7 +232,7 @@ Deno.serve(async (req: Request) => {
     await admin.from("attendance_devices").update({ last_seen_at: new Date().toISOString() }).eq("id", device.id);
     await admin.from("collector_api_tokens").update({ last_used_at: new Date().toISOString() }).eq("id", tokenRow.id);
 
-    const duplicateCount = Math.max(0, rows.length - inserted);
+    const duplicateCount = insertError ? 0 : Math.max(0, rows.length - inserted);
     const status = failed ? (inserted || duplicateCount ? "partial" : "failed") : "completed";
     const { error: finishError } = await admin.from("collector_sync_runs").update({
       completed_at: new Date().toISOString(), status,
@@ -224,7 +243,7 @@ Deno.serve(async (req: Request) => {
     if (finishError) throw finishError;
 
     return reply({
-      ok: !insertError,
+      ok: !insertError && failed === 0,
       device: deviceSerial,
       run_id: run.id,
       records_seen: incoming.length,
@@ -236,7 +255,7 @@ Deno.serve(async (req: Request) => {
       direction_mapping: "Only explicit IN/OUT text is classified. Numeric and bitmask modes are stored unchanged pending a device-specific verification.",
       errors,
       ...(insertError ? { insert_error: insertError } : {}),
-    }, insertError ? 500 : 200);
+    }, insertError ? 500 : failed ? 422 : 200);
   } catch (error) {
     console.error("biomax-ingest error", error);
     return reply({ error: error instanceof Error ? error.message : "Collector ingestion failed" }, 500);
