@@ -8,6 +8,7 @@ import type { EmployeeInput } from './components/EmployeeManagement';
 import AttendanceRegister from './components/AttendanceRegister';
 import type { PunchEvent } from './components/AttendanceRegister';
 import DeviceMonitoring from './components/DeviceMonitoring';
+import { getDatabaseErrorMessage } from './lib/databaseError';
 
 type Profile = { id: string; employee_code: string; full_name: string; department: string | null; designation: string | null; biomax_user_id: string | null; employment_status: string; email: string | null; phone: string | null; joined_on: string | null; auth_user_id: string | null };
 type DayRow = { id: string; employee_id: string; attendance_date: string; first_in_at: string | null; last_out_at: string | null; status: string; working_minutes: number | null; late_minutes: number | null; early_leave_minutes: number | null; manual_break_minutes: number | null; manual_break_recorded_at: string | null; manual_break_note: string | null; issue_codes: string[] | null };
@@ -210,10 +211,8 @@ export default function App() {
       if (result.error) throw result.error;
       setNotice(id ? 'Employee profile updated successfully.' : 'Employee profile created successfully.');
       await loadData();
-    } catch (e) {
-      const message = e instanceof Error ? e.message : 'Employee profile could not be saved.';
-      setError(message);
-      throw new Error(message);
+    } catch (error: unknown) {
+      throw new Error(getDatabaseErrorMessage(error, 'Employee profile could not be saved. Please review the details and retry.'));
     } finally {
       setBusy(false);
     }

@@ -1,5 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
+import { getDatabaseErrorMessage } from '../lib/databaseError';
+import './EmployeeManagement.css';
 
 export type EmployeeRecord = {
   id: string;
@@ -56,6 +58,23 @@ export default function EmployeeManagement({ employees, saving, onSave, onRefres
   const [form, setForm] = useState<EmployeeInput>(emptyForm());
   const [formOpen, setFormOpen] = useState(false);
   const [localError, setLocalError] = useState('');
+
+  useEffect(() => {
+    if (!formOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setFormOpen(false);
+        setLocalError('');
+      }
+    };
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [formOpen]);
 
   const departments = useMemo(
     () => Array.from(new Set(employees.map((employee) => employee.department).filter(Boolean) as string[])).sort(),
@@ -135,7 +154,7 @@ export default function EmployeeManagement({ employees, saving, onSave, onRefres
       setEditingId(null);
       setForm(emptyForm());
     } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Employee could not be saved.');
+      setLocalError(getDatabaseErrorMessage(error, 'Employee could not be saved.'));
     }
   }
 
@@ -165,14 +184,30 @@ export default function EmployeeManagement({ employees, saving, onSave, onRefres
       </section>
 
       {formOpen && (
-        <form className="employee-editor panel" onSubmit={submit}>
+        <div
+          className="employee-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setFormOpen(false);
+              setLocalError('');
+            }
+          }}
+        >
+          <form
+            className="employee-editor employee-editor-modal panel"
+            onSubmit={submit}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="employee-editor-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
           <div className="employee-editor-heading">
             <div>
               <span className="module-kicker">{editingId ? 'UPDATE PROFILE' : 'NEW PROFILE'}</span>
-              <h2>{editingId ? 'Edit employee' : 'Add employee'}</h2>
+              <h2 id="employee-editor-title">{editingId ? 'Edit employee' : 'Add employee'}</h2>
               <p>Employee master details only. Login provisioning is a separate controlled step.</p>
             </div>
-            <button className="icon-close" type="button" onClick={() => setFormOpen(false)} aria-label="Close form">×</button>
+            <button className="icon-close" type="button" onClick={() => { setFormOpen(false); setLocalError(''); }} aria-label="Close form">×</button>
           </div>
           <div className="employee-form-grid">
             <label>Employee code <b>*</b><input value={form.employee_code} onChange={(event) => setForm({ ...form, employee_code: event.target.value })} required maxLength={40} placeholder="e.g. GS-0001" /></label>
@@ -185,12 +220,13 @@ export default function EmployeeManagement({ employees, saving, onSave, onRefres
             <label>Phone<input type="tel" value={form.phone ?? ''} onChange={(event) => setForm({ ...form, phone: event.target.value })} maxLength={30} placeholder="Contact number" /></label>
             <label>Joining date<input type="date" value={form.joined_on ?? ''} onChange={(event) => setForm({ ...form, joined_on: event.target.value })} /></label>
           </div>
-          {localError && <div className="error">{localError}</div>}
+          {localError && <div className="employee-form-error" role="alert" aria-live="polite">{localError}</div>}
           <div className="employee-editor-footer">
             <span className="module-footnote">Saving a profile does not create or grant a login account.</span>
-            <div><button className="secondary-button" type="button" onClick={() => setFormOpen(false)}>Cancel</button><button type="submit" disabled={saving}>{saving ? 'Saving…' : editingId ? 'Save changes' : 'Create employee'}</button></div>
+            <div><button className="secondary-button" type="button" onClick={() => { setFormOpen(false); setLocalError(''); }}>Cancel</button><button type="submit" disabled={saving}>{saving ? 'Saving…' : editingId ? 'Save changes' : 'Create employee'}</button></div>
           </div>
-        </form>
+          </form>
+        </div>
       )}
 
       <section className="panel employee-list-panel">
